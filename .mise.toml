@@ -91,3 +91,19 @@ FILES=$(find include src cli tests -type f \( -name '*.hpp' -o -name '*.h' -o -n
 [ -z "$FILES" ] && { echo 'No C/C++ files found'; exit 0; }
 clang-format --dry-run -Werror $FILES
 '''
+
+[tasks.test]
+description = "Build with Ninja and run all tests via ctest. Example: mise run test"
+run = '''
+set -euo pipefail
+if [ -f build/CMakeCache.txt ] && ! grep -q "CMAKE_GENERATOR:INTERNAL=Ninja" build/CMakeCache.txt; then
+  echo "Existing build/ uses a different CMake generator. Please run: rm -rf build" >&2
+  exit 2
+fi
+if [ ! -f build/CMakeCache.txt ]; then
+  cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release} -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}
+fi
+cmake --build build --config ${CMAKE_BUILD_TYPE:-Release} -j
+JOBS=$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+CTEST_OUTPUT_ON_FAILURE=1 ctest --test-dir build -j "${JOBS}"
+'''
