@@ -93,7 +93,7 @@ if (PROBKIT_BUILD_TESTS)
     tests/bloom_test.cpp
     tests/hll_test.cpp
     tests/cms_test.cpp
-    tests/pipeline_test.cpp
+    tests/expected_test.cpp
   )
   target_link_libraries(probkit_tests PRIVATE probkit)
   add_test(NAME probkit_tests COMMAND probkit_tests)
@@ -135,14 +135,16 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/probkitConfig.cmake
   @ONLY
 )
-install(FILES
-  "${CMAKE_CURRENT_BINARY_DIR}/probkitConfig.cmake"
+
 # Export compile_commands.json for tooling (clangd/clang-tidy)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Visibility defaults (reduce exposed symbols by default)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/probkitConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/probkitConfigVersion.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/probkit
 )
