@@ -1,0 +1,224 @@
+#pragma once
+
+#include <cassert>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+#include "probkit/error.hpp"
+
+// Prefer std::expected (C++23) when available
+#ifdef __has_include
+#if __has_include(<version>)
+#include <version>
+#endif
+#if __has_include(<expected>)
+#include <expected>
+#ifdef __cpp_lib_expected
+#define PROBKIT_HAS_STD_EXPECTED 1
+#endif
+#endif
+#endif
+
+namespace probkit {
+
+#ifdef PROBKIT_HAS_STD_EXPECTED
+
+template <class T, class E> using expected = std::expected<T, E>;
+
+template <class T> using result = std::expected<T, error>;
+
+#else
+
+// Minimal expected-like type for C++20 (no exceptions required).
+template <class T, class E> class [[nodiscard]] expected {
+public:
+  using value_type = T;
+  using error_type = E;
+
+  expected(const expected& other) {
+    if (other.has_) {
+      ::new (&storage_.val) T(other.storage_.val);
+      has_ = true;
+    } else {
+      ::new (&storage_.err) E(other.storage_.err);
+      has_ = false;
+    }
+  }
+
+  expected(expected&& other) noexcept(std::is_nothrow_move_constructible_v<T> &&
+                                      std::is_nothrow_move_constructible_v<E>) {
+    if (other.has_) {
+      ::new (&storage_.val) T(std::move(other.storage_.val));
+      has_ = true;
+    } else {
+      ::new (&storage_.err) E(std::move(other.storage_.err));
+      has_ = false;
+    }
+  }
+
+  auto operator=(const expected& other) -> expected& {
+    if (this == &other) {
+      return *this;
+    }
+    this->~expected();
+    new (this) expected(other);
+    return *this;
+  }
+
+  auto operator=(expected&& other) noexcept(std::is_nothrow_move_constructible_v<T> &&
+                                            std::is_nothrow_move_constructible_v<E> &&
+                                            std::is_nothrow_move_assignable_v<T> &&
+                                            std::is_nothrow_move_assignable_v<E>) -> expected& {
+    if (this == &other) {
+      return *this;
+    }
+    this->~expected();
+    new (this) expected(std::move(other));
+    return *this;
+  }
+
+  ~expected() {
+    if (has_) {
+      storage_.val.~T();
+    } else {
+      storage_.err.~E();
+    }
+  }
+
+  // Construct value
+  expected(const T& v) : has_(true) {
+    ::new (&storage_.val) T(v);
+  }
+  expected(T&& v) : has_(true) {
+    ::new (&storage_.val) T(std::move(v));
+  }
+  template <class... Args> explicit expected(std::in_place_t /*unused*/, Args&&... args) : has_(true) {
+    ::new (&storage_.val) T(std::forward<Args>(args)...);
+  }
+
+  // Construct error
+  expected(const E& e) {
+    ::new (&storage_.err) E(e);
+  }
+  expected(E&& e) {
+    ::new (&storage_.err) E(std::move(e));
+  }
+  template <class... Args> static auto from_error(Args&&... args) -> expected {
+    expected r{std::forward<Args>(args)...};
+    return r;
+  }
+
+  // Observers
+  [[nodiscard]] auto has_value() const noexcept -> bool {
+    return has_;
+  }
+  explicit operator bool() const noexcept {
+    return has_;
+  }
+
+  auto value() & -> T& {
+    assert(has_ && "expected::value() on error");
+    return storage_.val;
+  }
+  [[nodiscard]] auto value() const& -> const T& {
+    assert(has_ && "expected::value() on error");
+    return storage_.val;
+  }
+  auto value() && -> T&& {
+    assert(has_ && "expected::value() on error");
+    return std::move(storage_.val);
+  }
+
+  auto error() & -> E& {
+    assert(!has_ && "expected::error() on value");
+    return storage_.err;
+  }
+  [[nodiscard]] auto error() const& -> const E& {
+    assert(!has_ && "expected::error() on value");
+    return storage_.err;
+  }
+  auto error() && -> E&& {
+    assert(!has_ && "expected::error() on value");
+    return std::move(storage_.err);
+  }
+
+private:
+  bool has_{false};
+  union Storage {
+    T val;
+    E err;
+    Storage() {}
+    ~Storage() {}
+  } storage_;
+};
+
+// void specialization
+template <class E> class [[nodiscard]] expected<void, E> {
+public:
+  using value_type = void;
+  using error_type = E;
+
+  expected() : has_(true) {}
+  expected(const expected& other) : has_(other.has_) {
+    if (!has_) {
+      ::new (&storage_.err) E(other.storage_.err);
+    }
+  }
+  expected(expected&& other) noexcept(std::is_nothrow_move_constructible_v<E>) : has_(other.has_) {
+    if (!has_) {
+      ::new (&storage_.err) E(std::move(other.storage_.err));
+    }
+  }
+  ~expected() {
+    if (!has_) {
+      storage_.err.~E();
+    }
+  }
+
+  expected(const E& e) {
+    ::new (&storage_.err) E(e);
+  }
+  expected(E&& e) {
+    ::new (&storage_.err) E(std::move(e));
+  }
+  template <class... Args> static auto from_error(Args&&... args) -> expected {
+    expected r{E(std::forward<Args>(args)...)};
+    return r;
+  }
+
+  [[nodiscard]] auto has_value() const noexcept -> bool {
+    return has_;
+  }
+  explicit operator bool() const noexcept {
+    return has_;
+  }
+
+  void value() const noexcept {}
+  auto error() & -> E& {
+    assert(!has_ && "expected<void>::error() on value");
+    return storage_.err;
+  }
+  [[nodiscard]] auto error() const& -> const E& {
+    assert(!has_ && "expected<void>::error() on value");
+    return storage_.err;
+  }
+  auto error() && -> E&& {
+    assert(!has_ && "expected<void>::error() on value");
+    return std::move(storage_.err);
+  }
+
+private:
+  bool has_{false};
+  union Storage {
+    E err;
+    Storage() {}
+    ~Storage() {}
+  } storage_;
+};
+
+template <class T> using result = expected<T, error>;
+
+#endif // PROBKIT_HAS_STD_EXPECTED
+
+} // namespace probkit

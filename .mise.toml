@@ -1,0 +1,109 @@
+[env]
+CMAKE_CXX_STANDARD = "20"
+# Default build type (can be overridden: CMAKE_BUILD_TYPE=Debug mise run build)
+CMAKE_BUILD_TYPE = "Release"
+
+[tasks.build]
+description = "Build with Ninja (fixed). If build/ was configured with another generator, abort with guidance."
+run = '''
+set -euo pipefail
+if [ -f build/CMakeCache.txt ] && ! grep -q "CMAKE_GENERATOR:INTERNAL=Ninja" build/CMakeCache.txt; then
+  echo "Existing build/ uses a different CMake generator. Please run: rm -rf build" >&2
+  exit 2
+fi
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release} -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}
+cmake --build build --config ${CMAKE_BUILD_TYPE:-Release} -j
+'''
+
+[tasks.exec]
+description = "Run probkit CLI: mise run exec -- [args]"
+run = '''
+set -euo pipefail
+if [ ! -x build/probkit ]; then
+  echo "Binary 'build/probkit' not found. Run: mise run build" >&2
+  exit 1
+fi
+# Support passing args after `--` (both $MISE_TASK_ARGS and $@ are attempted)
+ARGS=${MISE_TASK_ARGS:-}
+exec build/probkit ${ARGS} "$@"
+'''
+
+[tasks.fmt]
+description = "Format sources (in-place)"
+run = '''
+set -euo pipefail
+FILES=$(find include src cli tests -type f \( -name '*.hpp' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
+[ -z "$FILES" ] && { echo 'No C/C++ files found'; exit 0; }
+clang-format -i $FILES
+'''
+
+[tasks.lint]
+description = "Lint with clang-tidy (Ninja compile DB)"
+run = '''
+set -euo pipefail
+if [ -f build/CMakeCache.txt ] && ! grep -q "CMAKE_GENERATOR:INTERNAL=Ninja" build/CMakeCache.txt; then
+  echo "Existing build/ uses a different CMake generator. Please run: rm -rf build" >&2
+  exit 2
+fi
+if [ ! -f build/compile_commands.json ]; then
+  cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release} -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD} || true
+fi
+clang-tidy --version >/dev/null 2>&1 || { echo 'clang-tidy not found in PATH'; exit 127; }
+
+FILES=$(find src cli -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
+[ -z "$FILES" ] && { echo 'No C++ source files found'; exit 0; }
+
+rc=0
+if [ -f build/compile_commands.json ]; then
+  for f in $FILES; do echo "> $f"; if ! clang-tidy -p build -extra-arg=-Iinclude -quiet "$f" --; then rc=1; fi; done
+else
+  for f in $FILES; do echo "> $f"; if ! clang-tidy -extra-arg=-std=c++20 -extra-arg=-Iinclude -quiet "$f" --; then rc=1; fi; done
+fi
+exit $rc
+'''
+
+[tasks."lint:fix"]
+description = "Lint with auto-fixes (Ninja compile DB)"
+run = '''
+set -euo pipefail
+if [ -f build/CMakeCache.txt ] && ! grep -q "CMAKE_GENERATOR:INTERNAL=Ninja" build/CMakeCache.txt; then
+  echo "Existing build/ uses a different CMake generator. Please run: rm -rf build" >&2
+  exit 2
+fi
+if [ ! -f build/compile_commands.json ]; then
+  cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release} -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD} || true
+fi
+clang-tidy --version >/dev/null 2>&1 || { echo 'clang-tidy not found in PATH'; exit 127; }
+FILES=$(find src cli -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
+[ -z "$FILES" ] && { echo 'No C++ source files found'; exit 0; }
+if [ -f build/compile_commands.json ]; then
+  for f in $FILES; do echo "> $f"; clang-tidy -p build -extra-arg=-Iinclude -fix -quiet "$f" -- || true; done
+else
+  for f in $FILES; do echo "> $f"; clang-tidy -extra-arg=-std=c++20 -extra-arg=-Iinclude -fix -quiet "$f" -- || true; done
+fi
+'''
+
+[tasks."fmt:check"]
+description = "Check formatting (dry-run)"
+run = '''
+set -euo pipefail
+FILES=$(find include src cli tests -type f \( -name '*.hpp' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
+[ -z "$FILES" ] && { echo 'No C/C++ files found'; exit 0; }
+clang-format --dry-run -Werror $FILES
+'''
+
+[tasks.test]
+description = "Build with Ninja and run all tests via ctest. Example: mise run test"
+run = '''
+set -euo pipefail
+if [ -f build/CMakeCache.txt ] && ! grep -q "CMAKE_GENERATOR:INTERNAL=Ninja" build/CMakeCache.txt; then
+  echo "Existing build/ uses a different CMake generator. Please run: rm -rf build" >&2
+  exit 2
+fi
+if [ ! -f build/CMakeCache.txt ]; then
+  cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release} -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}
+fi
+cmake --build build --config ${CMAKE_BUILD_TYPE:-Release} -j
+JOBS=$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+CTEST_OUTPUT_ON_FAILURE=1 ctest --test-dir build -j "${JOBS}"
+'''
