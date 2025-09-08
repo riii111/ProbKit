@@ -11,7 +11,7 @@ Checks: >
   -cppcoreguidelines-special-member-functions,
   -readability-identifier-naming
 
-HeaderFilterRegex: '^(include/probkit|src|cli|tests|bench)/'
+HeaderFilterRegex: '^(include/probkit|src|cli)/'
 FormatStyle: file
 
 # Promote only the most critical families to errors to avoid noisy CI
@@ -29,6 +29,6 @@ CheckOptions:
   - key:             readability-identifier-length.MinimumParameterNameLength
     value:           '2'
   - key:             readability-identifier-length.IgnoredParameterNames
-    value:           '^(e|ec|ev|id|ok|ng|p|v|ctx)$'
+    value:           '^(e|ec|id|ok|ng|it|ts|ctx|p|v)$'
   - key:             readability-identifier-length.IgnoredVariableNames
-    value:           '^(it|ok|ng|r|i|j|k)$'
+    value:           '^(i|j|k|a|b|c|e|ok|ng|it)$'

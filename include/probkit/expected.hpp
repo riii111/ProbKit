@@ -1,13 +1,34 @@
 #pragma once
 
+#include <cassert>
 #include <new>
 #include <type_traits>
 #include <utility>
-#include <cassert>
 
 #include "probkit/error.hpp"
 
+// Prefer std::expected (C++23) when available
+#ifdef __has_include
+#if __has_include(<version>)
+#include <version>
+#endif
+#if __has_include(<expected>)
+#include <expected>
+#ifdef __cpp_lib_expected
+#define PROBKIT_HAS_STD_EXPECTED 1
+#endif
+#endif
+#endif
+
 namespace probkit {
+
+#ifdef PROBKIT_HAS_STD_EXPECTED
+
+template <class T, class E> using expected = std::expected<T, E>;
+
+template <class T> using result = std::expected<T, error>;
+
+#else
 
 // Minimal expected-like type for C++20 (no exceptions required).
 template <class T, class E> class [[nodiscard]] expected {
@@ -197,5 +218,7 @@ private:
 };
 
 template <class T> using result = expected<T, error>;
+
+#endif // PROBKIT_HAS_STD_EXPECTED
 
 } // namespace probkit

@@ -85,14 +85,19 @@ struct error {
   }
 
   void append_context(std::string_view more) {
-    if (more.empty()) return;
-    if (context.empty()) { context.assign(more); return; }
+    if (more.empty()) {
+      return;
+    }
+    if (context.empty()) {
+      context.assign(more);
+      return;
+    }
     context.push_back(' ');
     context.append(more);
   }
 
-  friend bool operator==(const error& a, const error& b) noexcept {
-    return a.code == b.code && a.context == b.context;
+  friend auto operator==(const error& lhs, const error& rhs) noexcept -> bool {
+    return lhs.code == rhs.code && lhs.context == rhs.context;
   }
 };
 

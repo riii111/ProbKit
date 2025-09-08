@@ -10,8 +10,8 @@ using probkit::result;
 
 static void copy_move_value() {
   result<std::string> a{std::string("ok")};
-  auto b = a;               // copy
-  auto c = std::move(a);    // move
+  auto b = a;            // copy
+  auto c = std::move(a); // move
   assert(b.has_value());
   assert(c.has_value());
   assert(b.value() == "ok");
@@ -21,8 +21,8 @@ static void copy_move_value() {
 static void copy_move_error() {
   error e = probkit::make_error(errc::invalid_argument, "x");
   result<std::string> a{e};
-  auto b = a;               // copy
-  auto c = std::move(a);    // move
+  auto b = a;            // copy
+  auto c = std::move(a); // move
   assert(!b.has_value());
   assert(!c.has_value());
   assert(b.error() == e);
@@ -42,4 +42,3 @@ auto main() -> int {
   error_context();
   return 0;
 }
-
