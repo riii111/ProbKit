@@ -3,13 +3,14 @@
 #include <new>
 #include <type_traits>
 #include <utility>
+#include <cassert>
 
 #include "probkit/error.hpp"
 
 namespace probkit {
 
 // Minimal expected-like type for C++20 (no exceptions required).
-template <class T, class E> class expected {
+template <class T, class E> class [[nodiscard]] expected {
 public:
   using value_type = T;
   using error_type = E;
@@ -96,22 +97,28 @@ public:
   }
 
   auto value() & -> T& {
+    assert(has_ && "expected::value() on error");
     return storage_.val;
   }
   [[nodiscard]] auto value() const& -> const T& {
+    assert(has_ && "expected::value() on error");
     return storage_.val;
   }
   auto value() && -> T&& {
+    assert(has_ && "expected::value() on error");
     return std::move(storage_.val);
   }
 
   auto error() & -> E& {
+    assert(!has_ && "expected::error() on value");
     return storage_.err;
   }
   [[nodiscard]] auto error() const& -> const E& {
+    assert(!has_ && "expected::error() on value");
     return storage_.err;
   }
   auto error() && -> E&& {
+    assert(!has_ && "expected::error() on value");
     return std::move(storage_.err);
   }
 
@@ -126,7 +133,7 @@ private:
 };
 
 // void specialization
-template <class E> class expected<void, E> {
+template <class E> class [[nodiscard]] expected<void, E> {
 public:
   using value_type = void;
   using error_type = E;
@@ -168,12 +175,15 @@ public:
 
   void value() const noexcept {}
   auto error() & -> E& {
+    assert(!has_ && "expected<void>::error() on value");
     return storage_.err;
   }
   [[nodiscard]] auto error() const& -> const E& {
+    assert(!has_ && "expected<void>::error() on value");
     return storage_.err;
   }
   auto error() && -> E&& {
+    assert(!has_ && "expected<void>::error() on value");
     return std::move(storage_.err);
   }
 

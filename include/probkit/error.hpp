@@ -83,6 +83,17 @@ struct error {
   [[nodiscard]] auto message() const -> std::string {
     return context.empty() ? code.message() : (std::string(code.message()) + ": " + context);
   }
+
+  void append_context(std::string_view more) {
+    if (more.empty()) return;
+    if (context.empty()) { context.assign(more); return; }
+    context.push_back(' ');
+    context.append(more);
+  }
+
+  friend bool operator==(const error& a, const error& b) noexcept {
+    return a.code == b.code && a.context == b.context;
+  }
 };
 
 inline auto make_error(errc err, std::string_view ctx = {}) -> error {

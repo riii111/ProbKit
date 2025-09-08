@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(probkit-cpp LANGUAGES CXX)
+project(probkit-cpp VERSION 0.1.0 LANGUAGES CXX)
 
 option(PROBKIT_BUILD_TESTS      "Build tests"               ON)
 option(PROBKIT_BUILD_BENCH      "Build benchmarks"          OFF)
@@ -13,10 +13,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  add_compile_options(-fno-rtti)
-  # Library core prefers no exceptions; CLI may still use them minimally.
-endif()
+# Core library prefers no RTTI; CLI/Tests may use RTTI.
 
 # Warnings
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -68,13 +65,16 @@ target_include_directories(probkit
 )
 # Core library: prefer no exceptions (header APIs return result<T>)
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(probkit PRIVATE -fno-exceptions)
+  target_compile_options(probkit PRIVATE -fno-exceptions -fno-rtti)
 endif()
 # Size/speed link-time flags (gc of unused)
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(probkit PRIVATE -ffunction-sections -fdata-sections)
   target_link_options(probkit PRIVATE -Wl,--gc-sections)
 endif()
+
+# Build static lib with PIC to ease later shared linkage
+set_target_properties(probkit PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ===================== CLI target =====================
 add_executable(probkit_cli
@@ -131,12 +131,27 @@ write_basic_package_version_file(
   COMPATIBILITY SameMajorVersion
 )
 configure_file(
-  ${CMAKE_CURRENT_LIST_DIR}/cmake/probkItConfig.cmake.in
+  ${CMAKE_CURRENT_LIST_DIR}/cmake/probkitConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/probkitConfig.cmake
   @ONLY
 )
 install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/probkitConfig.cmake"
+# Export compile_commands.json for tooling (clangd/clang-tidy)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Visibility defaults (reduce exposed symbols by default)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
   "${CMAKE_CURRENT_BINARY_DIR}/probkitConfigVersion.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/probkit
 )
+
+# Optional: enable clang-tidy as part of the build when requested
+option(PROBKIT_CLANG_TIDY "Run clang-tidy during build" OFF)
+if (PROBKIT_CLANG_TIDY)
+  find_program(CLANG_TIDY_EXE NAMES clang-tidy)
+  if (CLANG_TIDY_EXE)
+    set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_EXE}")
+  endif()
+endif()
