@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "probkit/hash.hpp"
 
@@ -20,6 +22,49 @@ static inline void check(bool ok, const char* msg) {
     std::fputc('\n', stderr);
     std::exit(1);
   }
+}
+
+// Generate compact boundary lenses around the algorithm chunk thresholds.
+static std::vector<int> make_boundary_lens() {
+  const int pivots[] = {0, 4, 8, 16, 32, 64};
+  std::vector<int> out;
+  out.reserve(3 * (int)(sizeof(pivots) / sizeof(pivots[0])));
+  auto push = [&](int v) {
+    if (v >= 0)
+      out.push_back(v);
+  };
+  for (int p : pivots) {
+    if (p == 0) {
+      push(0);
+      push(1); // special-case 0/-1/+1
+    } else {
+      push(p - 1);
+      push(p);
+      push(p + 1);
+    }
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
+static void run_boundary_lengths(HashKind kind, const char* label) {
+  HashConfig cfg{};
+  cfg.kind = kind;
+  std::uint64_t prev = 0;
+  bool have_prev = false;
+  for (int L : make_boundary_lens()) {
+    const std::string s(static_cast<std::size_t>(L), 'a');
+    const auto h1 = hash64(s, cfg);
+    const auto h2 = hash64(s, cfg);
+    check(h1 == h2, "reproducibility failed on boundary length");
+    if (have_prev) {
+      check(prev != h1, "adjacent boundary hashes should differ");
+    }
+    prev = h1;
+    have_prev = true;
+  }
+  (void)label; // reserved for richer reporting later
 }
 
 static void test_reproducible_same_config() {
@@ -81,22 +126,11 @@ static void test_seed_effect() {
 }
 
 static void test_boundary_lengths() {
-  HashConfig cfg{};
-  cfg.kind = HashKind::wyhash;
-  const std::array<int, 15> lens{0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65};
-  std::uint64_t prev = 0;
-  bool have_prev = false;
-  for (int L : lens) {
-    const std::string s(static_cast<std::size_t>(L), 'a');
-    const auto h1 = hash64(s, cfg);
-    const auto h2 = hash64(s, cfg);
-    check(h1 == h2, "reproducibility failed on boundary length");
-    if (have_prev) {
-      check(prev != h1, "adjacent boundary hashes should differ");
-    }
-    prev = h1;
-    have_prev = true;
-  }
+  run_boundary_lengths(HashKind::wyhash, "wyhash");
+}
+
+static void test_boundary_lengths_xxhash() {
+  run_boundary_lengths(HashKind::xxhash, "xxhash");
 }
 
 void run_hash_tests() {
@@ -106,6 +140,7 @@ void run_hash_tests() {
   test_empty_and_embedded_zero();
   test_seed_effect();
   test_boundary_lengths();
+  test_boundary_lengths_xxhash();
 }
 
 } // namespace tests

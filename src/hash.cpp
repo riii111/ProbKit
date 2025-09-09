@@ -91,10 +91,18 @@ inline auto wyhash_impl(std::string_view s, std::uint64_t seed) noexcept -> std:
     h = wymum(h ^ a, kWyP4);
     i += 8;
   }
-  if (i < n) {
+  const std::size_t rem = n - i;
+  if (rem >= 4) {
     const std::uint64_t a = load_u32_le(s, i) ^ kWyP2;
-    const std::uint64_t b = load_u32_le(s, n - 4) ^ kWyP3;
+    const std::uint64_t b = load_u32_le(s, i + rem - 4) ^ kWyP3;
     h = wymum(h ^ a, kWyP0) ^ b;
+  } else if (rem > 0) {
+    std::uint64_t a = 0;
+    for (std::size_t j = 0; j < rem; ++j) {
+      a |= (std::uint64_t)(unsigned char)s[i + j] << (8 * j);
+    }
+    a ^= kWyP2;
+    h = wymum(h ^ a, kWyP0);
   }
   h = wymum(h ^ kWyP1, kWyP4);
   return h;

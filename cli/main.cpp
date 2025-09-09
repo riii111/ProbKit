@@ -3,6 +3,8 @@
 #include <cstring>
 #include <string_view>
 
+using probkit::hashing::parse_hash_kind;
+
 auto main(int argc, char** argv) -> int {
   using probkit::hashing::HashConfig;
   using probkit::hashing::HashKind;
@@ -20,25 +22,21 @@ auto main(int argc, char** argv) -> int {
       }
       auto algo = arg;
       algo.remove_prefix(kHashEqLen);
-      if (algo == std::string_view{"wyhash"}) {
-        hash_cfg.kind = HashKind::wyhash;
-      } else if (algo == std::string_view{"xxh"}) {
-        hash_cfg.kind = HashKind::xxhash;
-      } else {
+      HashKind k{};
+      if (!parse_hash_kind(algo, k)) {
         std::fputs("error: unknown --hash value\n", stderr);
         return 2;
       }
+      hash_cfg.kind = k;
     } else if (arg == std::string_view{"--hash"} && i + 1 < argc) {
       ++i;
       std::string_view algo{argv[i]}; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-      if (algo == std::string_view{"wyhash"}) {
-        hash_cfg.kind = HashKind::wyhash;
-      } else if (algo == std::string_view{"xxh"}) {
-        hash_cfg.kind = HashKind::xxhash;
-      } else {
+      HashKind k{};
+      if (!parse_hash_kind(algo, k)) {
         std::fputs("error: unknown --hash value\n", stderr);
         return 2;
       }
+      hash_cfg.kind = k;
     } else if (arg == std::string_view{"--hash"} && i + 1 >= argc) {
       std::fputs("error: --hash requires a value\n", stderr);
       return 2;
