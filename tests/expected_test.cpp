@@ -41,9 +41,17 @@ static void error_context() {
 }
 
 auto main() -> int {
-  copy_move_value();
-  copy_move_error();
-  error_context();
-  tests::run_hash_tests();
-  return 0;
+  try {
+    copy_move_value();
+    copy_move_error();
+    error_context();
+    tests::run_hash_tests();
+    return 0;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "unexpected exception: %s\n", e.what());
+    return 2;
+  } catch (...) {
+    std::fprintf(stderr, "unexpected non-std exception\n");
+    return 2;
+  }
 }

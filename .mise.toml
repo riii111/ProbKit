@@ -50,7 +50,7 @@ if [ ! -f build/compile_commands.json ]; then
 fi
 clang-tidy --version >/dev/null 2>&1 || { echo 'clang-tidy not found in PATH'; exit 127; }
 
-FILES=$(find src cli -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
+FILES=$(find src cli tests -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
 [ -z "$FILES" ] && { echo 'No C++ source files found'; exit 0; }
 
 rc=0
@@ -74,7 +74,7 @@ if [ ! -f build/compile_commands.json ]; then
   cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release} -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD} || true
 fi
 clang-tidy --version >/dev/null 2>&1 || { echo 'clang-tidy not found in PATH'; exit 127; }
-FILES=$(find src cli -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
+FILES=$(find src cli tests -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
 [ -z "$FILES" ] && { echo 'No C++ source files found'; exit 0; }
 if [ -f build/compile_commands.json ]; then
   for f in $FILES; do echo "> $f"; clang-tidy -p build -extra-arg=-Iinclude -fix -quiet "$f" -- || true; done

@@ -25,13 +25,14 @@ static inline void check(bool ok, const char* msg) {
 }
 
 // Generate compact boundary lenses around the algorithm chunk thresholds.
-static std::vector<int> make_boundary_lens() {
-  const int pivots[] = {0, 4, 8, 16, 32, 64};
+static auto make_boundary_lens() -> std::vector<int> {
+  constexpr std::array<int, 6> pivots{0, 4, 8, 16, 32, 64};
   std::vector<int> out;
-  out.reserve(3 * (int)(sizeof(pivots) / sizeof(pivots[0])));
-  auto push = [&](int v) {
-    if (v >= 0)
+  out.reserve(static_cast<std::size_t>(3) * pivots.size());
+  auto push = [&](int v) -> void {
+    if (v >= 0) {
       out.push_back(v);
+    }
   };
   for (int p : pivots) {
     if (p == 0) {
