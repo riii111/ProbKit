@@ -102,7 +102,9 @@ inline auto load_u32_le(std::string_view s, std::size_t off) noexcept -> std::ui
 
 inline auto wymum(std::uint64_t a, std::uint64_t b) noexcept -> std::uint64_t {
   __uint128_t r = static_cast<__uint128_t>(a) * static_cast<__uint128_t>(b);
-  return static_cast<std::uint64_t>(r) ^ static_cast<std::uint64_t>(r >> 64);
+  auto low_bits = static_cast<std::uint64_t>(r);
+  auto high_bits = static_cast<std::uint64_t>(r >> 64);
+  return low_bits ^ high_bits;
 }
 
 inline auto wyhash_impl(std::string_view s, std::uint64_t seed) noexcept -> std::uint64_t {
@@ -111,9 +113,10 @@ inline auto wyhash_impl(std::string_view s, std::uint64_t seed) noexcept -> std:
   std::uint64_t h = seed ^ (secret + static_cast<std::uint64_t>(n));
   std::size_t i = 0;
   while (i + 16 <= n) {
-    const std::uint64_t a = load_u64_le(s, i) ^ kWyP1;
-    const std::uint64_t b = load_u64_le(s, i + 8) ^ kWyP2;
-    h = wymum(h ^ a, kWyP0) ^ wymum(b, kWyP3);
+    // 16-byte parallel processing for CPU execution unit utilization
+    const std::uint64_t left_chunk = load_u64_le(s, i) ^ kWyP1;
+    const std::uint64_t right_chunk = load_u64_le(s, i + 8) ^ kWyP2;
+    h = wymum(h ^ left_chunk, kWyP0) ^ wymum(right_chunk, kWyP3);
     i += 16;
   }
   if (i + 8 <= n) {
@@ -143,38 +146,39 @@ inline auto xxhash64_impl(std::string_view s, std::uint64_t seed) noexcept -> st
   std::size_t i = 0;
   std::uint64_t h = 0;
   if (n >= 32) {
-    std::uint64_t v1 = seed + kXxPrime1 + kXxPrime2;
-    std::uint64_t v2 = seed + kXxPrime2;
-    std::uint64_t v3 = seed + 0;
-    std::uint64_t v4 = seed - kXxPrime1;
+    // 4-way parallel accumulators for high throughput
+    std::uint64_t acc1 = seed + kXxPrime1 + kXxPrime2;
+    std::uint64_t acc2 = seed + kXxPrime2;
+    std::uint64_t acc3 = seed + 0;
+    std::uint64_t acc4 = seed - kXxPrime1;
     const std::size_t limit = n - 32;
     while (i <= limit) {
-      v1 = rotl_const<31U>(v1 + (load_u64_le(s, i) * kXxPrime2)) * kXxPrime1;
-      v2 = rotl_const<31U>(v2 + (load_u64_le(s, i + 8) * kXxPrime2)) * kXxPrime1;
-      v3 = rotl_const<31U>(v3 + (load_u64_le(s, i + 16) * kXxPrime2)) * kXxPrime1;
-      v4 = rotl_const<31U>(v4 + (load_u64_le(s, i + 24) * kXxPrime2)) * kXxPrime1;
+      acc1 = rotl_const<31U>(acc1 + (load_u64_le(s, i) * kXxPrime2)) * kXxPrime1;
+      acc2 = rotl_const<31U>(acc2 + (load_u64_le(s, i + 8) * kXxPrime2)) * kXxPrime1;
+      acc3 = rotl_const<31U>(acc3 + (load_u64_le(s, i + 16) * kXxPrime2)) * kXxPrime1;
+      acc4 = rotl_const<31U>(acc4 + (load_u64_le(s, i + 24) * kXxPrime2)) * kXxPrime1;
       i += 32;
     }
-    h = rotl_const<1U>(v1) + rotl_const<7U>(v2) + rotl_const<12U>(v3) + rotl_const<18U>(v4);
-    v1 = (v1 * kXxPrime2);
-    v1 = rotl_const<31U>(v1);
-    v1 *= kXxPrime1;
-    h ^= v1;
+    h = rotl_const<1U>(acc1) + rotl_const<7U>(acc2) + rotl_const<12U>(acc3) + rotl_const<18U>(acc4);
+    acc1 = (acc1 * kXxPrime2);
+    acc1 = rotl_const<31U>(acc1);
+    acc1 *= kXxPrime1;
+    h ^= acc1;
     h = (h * kXxPrime1) + kXxPrime4;
-    v2 = (v2 * kXxPrime2);
-    v2 = rotl_const<31U>(v2);
-    v2 *= kXxPrime1;
-    h ^= v2;
+    acc2 = (acc2 * kXxPrime2);
+    acc2 = rotl_const<31U>(acc2);
+    acc2 *= kXxPrime1;
+    h ^= acc2;
     h = (h * kXxPrime1) + kXxPrime4;
-    v3 = (v3 * kXxPrime2);
-    v3 = rotl_const<31U>(v3);
-    v3 *= kXxPrime1;
-    h ^= v3;
+    acc3 = (acc3 * kXxPrime2);
+    acc3 = rotl_const<31U>(acc3);
+    acc3 *= kXxPrime1;
+    h ^= acc3;
     h = (h * kXxPrime1) + kXxPrime4;
-    v4 = (v4 * kXxPrime2);
-    v4 = rotl_const<31U>(v4);
-    v4 *= kXxPrime1;
-    h ^= v4;
+    acc4 = (acc4 * kXxPrime2);
+    acc4 = rotl_const<31U>(acc4);
+    acc4 *= kXxPrime1;
+    h ^= acc4;
     h = (h * kXxPrime1) + kXxPrime4;
   } else {
     h = seed + kXxPrime5;
