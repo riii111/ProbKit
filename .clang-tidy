@@ -9,7 +9,9 @@ Checks: >
   -cppcoreguidelines-avoid-const-or-ref-data-members,
   -cppcoreguidelines-pro-type-union-access,
   -cppcoreguidelines-special-member-functions,
-  -readability-identifier-naming
+  -readability-identifier-naming,
+  -readability-identifier-length,
+  -readability-magic-numbers
 
 HeaderFilterRegex: '^(include/probkit|src|cli)/'
 FormatStyle: file
@@ -20,15 +22,5 @@ WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
 CheckOptions:
   - key:             modernize-use-nodiscard.Recommended
     value:           'true'
-  - key:             readability-magic-numbers.IgnoreEnums
-    value:           'true'
   - key:             performance-unnecessary-value-param.AllowedTypes
     value:           'std::string_view'
-  - key:             readability-identifier-length.MinimumVariableNameLength
-    value:           '2'
-  - key:             readability-identifier-length.MinimumParameterNameLength
-    value:           '2'
-  - key:             readability-identifier-length.IgnoredParameterNames
-    value:           '^(e|ec|id|ok|ng|it|ts|ctx|p|v)$'
-  - key:             readability-identifier-length.IgnoredVariableNames
-    value:           '^(i|j|k|a|b|c|e|ok|ng|it)$'
