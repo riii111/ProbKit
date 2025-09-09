@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -44,8 +45,14 @@ static auto make_boundary_lens() -> std::vector<int> {
       push(p + 1);
     }
   }
+#if defined(__cpp_lib_ranges) && (__cpp_lib_ranges >= 201911L)
+  std::ranges::sort(out);
+  const auto r = std::ranges::unique(out);
+  out.erase(r.begin(), r.end());
+#else
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());
+#endif
   return out;
 }
 

@@ -55,9 +55,9 @@ FILES=$(find src cli tests -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.
 
 rc=0
 if [ -f build/compile_commands.json ]; then
-  for f in $FILES; do echo "> $f"; if ! clang-tidy -p build -extra-arg=-Iinclude -quiet "$f" --; then rc=1; fi; done
+  for f in $FILES; do echo "> $f"; if ! clang-tidy -p build -extra-arg=-Iinclude "$f" --; then rc=1; fi; done
 else
-  for f in $FILES; do echo "> $f"; if ! clang-tidy -extra-arg=-std=c++20 -extra-arg=-Iinclude -quiet "$f" --; then rc=1; fi; done
+  for f in $FILES; do echo "> $f"; if ! clang-tidy -extra-arg=-std=c++20 -extra-arg=-Iinclude "$f" --; then rc=1; fi; done
 fi
 exit $rc
 '''
@@ -77,9 +77,9 @@ clang-tidy --version >/dev/null 2>&1 || { echo 'clang-tidy not found in PATH'; e
 FILES=$(find src cli tests -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \))
 [ -z "$FILES" ] && { echo 'No C++ source files found'; exit 0; }
 if [ -f build/compile_commands.json ]; then
-  for f in $FILES; do echo "> $f"; clang-tidy -p build -extra-arg=-Iinclude -fix -quiet "$f" -- || true; done
+  for f in $FILES; do echo "> $f"; clang-tidy -p build -extra-arg=-Iinclude -fix "$f" -- || true; done
 else
-  for f in $FILES; do echo "> $f"; clang-tidy -extra-arg=-std=c++20 -extra-arg=-Iinclude -fix -quiet "$f" -- || true; done
+  for f in $FILES; do echo "> $f"; clang-tidy -extra-arg=-std=c++20 -extra-arg=-Iinclude -fix "$f" -- || true; done
 fi
 '''
 
