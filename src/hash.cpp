@@ -7,6 +7,36 @@
 namespace probkit::hashing {
 
 namespace {
+inline auto splitmix64(std::uint64_t value) noexcept -> std::uint64_t;
+inline auto wyhash_impl(std::string_view s, std::uint64_t seed) noexcept -> std::uint64_t;
+inline auto xxhash64_impl(std::string_view s, std::uint64_t seed) noexcept -> std::uint64_t;
+} // namespace
+
+// ------------------------------------------------------------------
+// Public interface
+// ------------------------------------------------------------------
+
+auto derive_thread_salt(std::uint64_t base, std::uint64_t thread_index) noexcept -> std::uint64_t {
+  constexpr std::uint64_t kGoldenLocal = 0x9E3779B97F4A7C15ULL;
+  return splitmix64(base ^ (thread_index * kGoldenLocal));
+}
+
+auto hash64(std::string_view input, const HashConfig& cfg) noexcept -> std::uint64_t {
+  const std::uint64_t seed = cfg.seed ^ cfg.thread_salt;
+  switch (cfg.kind) {
+  case HashKind::wyhash:
+    return wyhash_impl(input, seed);
+  case HashKind::xxhash:
+    return xxhash64_impl(input, seed);
+  }
+  return wyhash_impl(input, seed);
+}
+
+// ------------------------------------------------------------------
+// Implementation details
+// ------------------------------------------------------------------
+
+namespace {
 constexpr int kShift30 = 30;
 constexpr int kShift27 = 27;
 constexpr int kShift31 = 31;
@@ -174,21 +204,5 @@ inline auto xxhash64_impl(std::string_view s, std::uint64_t seed) noexcept -> st
   return h;
 }
 } // namespace
-
-auto derive_thread_salt(std::uint64_t base, std::uint64_t thread_index) noexcept -> std::uint64_t {
-  // Reduce cross-thread collision correlation by spacing seeds
-  return splitmix64(base ^ (thread_index * kGolden));
-}
-
-auto hash64(std::string_view input, const HashConfig& cfg) noexcept -> std::uint64_t {
-  const std::uint64_t seed = cfg.seed ^ cfg.thread_salt;
-  switch (cfg.kind) {
-  case HashKind::wyhash:
-    return wyhash_impl(input, seed);
-  case HashKind::xxhash:
-    return xxhash64_impl(input, seed);
-  }
-  return wyhash_impl(input, seed);
-}
 
 } // namespace probkit::hashing
