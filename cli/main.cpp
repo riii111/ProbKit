@@ -9,7 +9,7 @@ auto main(int argc, char** argv) -> int {
   using probkit::hashing::HashConfig;
   using probkit::hashing::HashKind;
 
-  [[maybe_unused]] HashConfig hash_cfg{};
+  HashConfig hash_cfg{};
   constexpr const char* kHashEq = "--hash=";
   const std::size_t kHashEqLen = std::strlen(kHashEq);
   for (int i = 1; i < argc; ++i) {
