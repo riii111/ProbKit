@@ -57,6 +57,7 @@ add_library(probkit
   src/bloom.cpp
   src/hll.cpp
   src/cms.cpp
+  src/hash.cpp
 )
 target_include_directories(probkit
   PUBLIC
@@ -94,6 +95,7 @@ if (PROBKIT_BUILD_TESTS)
     tests/hll_test.cpp
     tests/cms_test.cpp
     tests/expected_test.cpp
+    tests/hash_test.cpp
   )
   target_link_libraries(probkit_tests PRIVATE probkit)
   add_test(NAME probkit_tests COMMAND probkit_tests)
