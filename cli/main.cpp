@@ -39,11 +39,14 @@ inline void print_root_help() {
              "usage: probkit <subcommand> [global-options] [subcommand-options]\n"
              "  subcommands: hll | bloom | cms\n\n"
              "global-options:\n"
-             "  --threads=<N>          number of worker threads (default: HW threads)\n"
-             "  --file=<path>         read from file (default: stdin)\n"
-             "  --json                 machine-readable output\n"
-             "  --hash=wyhash|xxhash  hash algorithm\n"
-             "  --stop-after=<count>  stop after processing N lines\n",
+             "  --threads=<N>           number of worker threads (default: HW threads)\n"
+             "  --file=<path>          read from file (default: stdin)\n"
+             "  --json                  machine-readable output\n"
+             "  --hash=wyhash|xxhash   hash algorithm\n"
+             "  --stop-after=<count>   stop after processing N lines\n"
+             "  --stats[=<seconds>]    print periodic stats (default interval: 5s)\n"
+             "  --bucket=<dur>         output per time-bucket (e.g., 30s, 1m)\n"
+             "  --prom[=<path>]        emit Prometheus textfile (to path or stdout)\n",
              stdout);
 }
 
@@ -84,6 +87,10 @@ inline void print_root_help() {
       print_root_help();
       return 0;
     }
+    if (a == std::string_view{"--json"}) {
+      g.json = true;
+      continue;
+    }
     if (sv_starts_with(a, std::string_view{"--threads="})) {
       std::uint64_t v = 0;
       auto val = a;
@@ -99,10 +106,6 @@ inline void print_root_help() {
       auto val = a;
       val.remove_prefix(std::string_view{"--file="}.size());
       g.file_path = std::string(val);
-      continue;
-    }
-    if (a == std::string_view{"--json"}) {
-      g.json = true;
       continue;
     }
     if (sv_starts_with(a, std::string_view{"--hash="})) {
@@ -125,6 +128,45 @@ inline void print_root_help() {
         return -1;
       }
       g.stop_after = v;
+      continue;
+    }
+    if (a == std::string_view{"--stats"}) {
+      g.stats = true;
+      g.stats_interval_seconds = 5U;
+      continue;
+    }
+    if (sv_starts_with(a, std::string_view{"--stats="})) {
+      std::uint64_t v = 0;
+      auto val = a;
+      val.remove_prefix(std::string_view{"--stats="}.size());
+      if (!parse_u64(val, v) || v == 0 || v > 3600) {
+        std::fputs("error: invalid --stats value (1..3600)\n", stderr);
+        return -1;
+      }
+      g.stats = true;
+      g.stats_interval_seconds = static_cast<unsigned>(v);
+      continue;
+    }
+    if (sv_starts_with(a, std::string_view{"--bucket="})) {
+      auto val = a;
+      val.remove_prefix(std::string_view{"--bucket="}.size());
+      if (val.empty()) {
+        std::fputs("error: invalid --bucket value\n", stderr);
+        return -1;
+      }
+      g.bucket = std::string(val);
+      continue;
+    }
+    if (a == std::string_view{"--prom"}) {
+      g.prom = true;
+      g.prom_path.clear();
+      continue;
+    }
+    if (sv_starts_with(a, std::string_view{"--prom="})) {
+      auto val = a;
+      val.remove_prefix(std::string_view{"--prom="}.size());
+      g.prom = true;
+      g.prom_path = std::string(val);
       continue;
     }
     std::fprintf(stderr, "error: unknown option: %.*s\n", static_cast<int>(a.size()), a.data());

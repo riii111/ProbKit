@@ -1,4 +1,5 @@
 #include "options.hpp"
+#include "probkit/hash.hpp"
 #include "probkit/hll.hpp"
 #include "util/string_utils.hpp"
 #include <atomic>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -15,6 +17,23 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+// Feature-detect stop_token/jthread
+#if defined(__has_include)
+#if __has_include(<stop_token>)
+#define PROBKIT_HAS_STOP_TOKEN 1
+#else
+#define PROBKIT_HAS_STOP_TOKEN 0
+#endif
+#else
+#define PROBKIT_HAS_STOP_TOKEN 0
+#endif
+
+#if defined(__cpp_lib_jthread) && (__cpp_lib_jthread >= 201911L)
+#define PROBKIT_HAS_JTHREAD 1
+#else
+#define PROBKIT_HAS_JTHREAD 0
+#endif
 
 using probkit::cli::util::sv_starts_with;
 
@@ -140,11 +159,14 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
     rings.push_back(ring_storage.back().get());
   }
 
-  // thread-local sketches
+  // thread-local sketches (derive per-thread salt)
   std::vector<probkit::hll::sketch> locals;
   locals.reserve(static_cast<std::size_t>(num_workers));
   for (int i = 0; i < num_workers; ++i) {
-    auto s = probkit::hll::sketch::make_by_precision(p, g.hash);
+    probkit::hashing::HashConfig hc = g.hash;
+    const std::uint64_t thread_index = static_cast<std::uint64_t>(i) + 1ULL;
+    hc.thread_salt = probkit::hashing::derive_thread_salt(hc.seed, thread_index);
+    auto s = probkit::hll::sketch::make_by_precision(p, hc);
     if (!s) {
       std::fputs("error: failed to init worker sketch\n", stderr);
       return 5;
@@ -155,9 +177,30 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
   std::atomic<bool> done{false};
 
   // Workers
+#if PROBKIT_HAS_JTHREAD
+  std::vector<std::jthread> workers;
+#else
   std::vector<std::thread> workers;
+#endif
   workers.reserve(static_cast<std::size_t>(num_workers));
   for (int wi = 0; wi < num_workers; ++wi) {
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+    workers.emplace_back([&, wi](std::stop_token st) -> void {
+      LineItem item;
+      auto& ring = *rings[static_cast<std::size_t>(wi)];
+      auto& sk = locals[static_cast<std::size_t>(wi)];
+      while (true) {
+        if (ring.pop(item)) {
+          (void)sk.add(item.data);
+        } else if (done.load(std::memory_order_acquire) || st.stop_requested()) {
+          // Drain complete
+          break;
+        } else {
+          std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+      }
+    });
+#else
     workers.emplace_back([&, wi]() -> void {
       LineItem item;
       auto& ring = *rings[static_cast<std::size_t>(wi)];
@@ -173,16 +216,31 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
         }
       }
     });
+#endif
   }
 
-  // Reader
-  auto reader = std::thread([&]() -> void {
+// Reader
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+  std::jthread reader([&](std::stop_token rst) -> void {
+    // Select input stream
+    std::ifstream file_in;
+    std::istream* in = &std::cin;
+    if (!g.file_path.empty()) {
+      file_in.open(g.file_path, std::ios::in);
+      if (!file_in.is_open()) {
+        std::fputs("error: failed to open --file\n", stderr);
+        done.store(true, std::memory_order_release);
+        return;
+      }
+      in = &file_in;
+    }
+
     std::string line;
     line.reserve(256);
     std::uint64_t processed = 0;
     int shard = 0;
-    while (true) {
-      if (!std::getline(std::cin, line)) {
+    while (!rst.stop_requested()) {
+      if (!std::getline(*in, line)) {
         break;
       }
       LineItem item{line};
@@ -199,12 +257,54 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
     }
     done.store(true, std::memory_order_release);
   });
+#else
+  std::thread reader([&]() -> void {
+    std::ifstream file_in;
+    std::istream* in = &std::cin;
+    if (!g.file_path.empty()) {
+      file_in.open(g.file_path, std::ios::in);
+      if (!file_in.is_open()) {
+        std::fputs("error: failed to open --file\n", stderr);
+        done.store(true, std::memory_order_release);
+        return;
+      }
+      in = &file_in;
+    }
+
+    std::string line;
+    line.reserve(256);
+    std::uint64_t processed = 0;
+    int shard = 0;
+    while (true) {
+      if (!std::getline(*in, line)) {
+        break;
+      }
+      LineItem item{line};
+      auto& ring = *rings[static_cast<std::size_t>(shard)];
+      while (!ring.push(item)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+      }
+      shard = (shard + 1) % num_workers;
+      if (g.stop_after && ++processed >= g.stop_after) {
+        break;
+      }
+    }
+    done.store(true, std::memory_order_release);
+  });
+#endif
 
   // Wait: reader then workers
   reader.join();
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+  for (auto& w : workers) {
+    w.request_stop();
+    // jthread joins on destruction; explicit stop to hasten exit if sleeping
+  }
+#else
   for (auto& w : workers) {
     w.join();
   }
+#endif
 
   // Reducer: merge locals
   auto global = std::move(sketch_r.value());
