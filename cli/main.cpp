@@ -1,5 +1,6 @@
 #include "options.hpp"
 #include "probkit/hash.hpp"
+#include "util/parse.hpp"
 #include "util/string_utils.hpp"
 #include <array>
 #include <cstdint>
@@ -7,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
-#include <limits>
 #include <string>
 #include <string_view>
 
@@ -15,6 +15,7 @@ using probkit::cli::CommandResult;
 using probkit::cli::ExitCode;
 using probkit::cli::OptionResult;
 using probkit::cli::to_int;
+using probkit::cli::util::parse_u64;
 using probkit::cli::util::sv_starts_with;
 using probkit::hashing::parse_hash_kind;
 
@@ -50,26 +51,6 @@ inline void print_root_help() {
              "  --bucket=<dur>         output per time-bucket (e.g., 30s, 1m)\n"
              "  --prom[=<path>]        emit Prometheus textfile (to path or stdout)\n",
              stdout);
-}
-
-[[nodiscard]] inline auto parse_u64(std::string_view s, std::uint64_t& out) noexcept -> bool {
-  if (s.empty()) {
-    return false;
-  }
-  std::uint64_t value = 0;
-  for (char i : s) {
-    const auto ch = static_cast<unsigned char>(i);
-    if (ch < '0' || ch > '9') {
-      return false;
-    }
-    const auto digit = static_cast<std::uint64_t>(ch - '0');
-    if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10ULL) {
-      return false; // overflow
-    }
-    value = (value * 10ULL) + digit;
-  }
-  out = value;
-  return true;
 }
 
 using HandlerFn = OptionResult (*)(std::string_view, probkit::cli::GlobalOptions&);

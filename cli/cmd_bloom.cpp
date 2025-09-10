@@ -1,6 +1,7 @@
 #include "options.hpp"
 #include "probkit/bloom.hpp"
 #include "probkit/hash.hpp"
+#include "util/parse.hpp"
 #include "util/string_utils.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,8 @@
 #include <vector>
 
 using probkit::cli::CommandResult;
+using probkit::cli::util::parse_double;
+using probkit::cli::util::parse_u64;
 using probkit::cli::util::sv_starts_with;
 
 namespace probkit::cli {
@@ -29,28 +32,6 @@ struct BloomOptions {
 constexpr std::string_view kFP = "--fp=";
 constexpr std::string_view kCAP = "--capacity-hint=";
 constexpr std::string_view kMEM = "--mem-budget=";
-
-[[nodiscard]] inline auto parse_double(std::string_view s, double& out) -> bool {
-  char* end = nullptr;
-  std::string tmp{s};
-  const double v = std::strtod(tmp.c_str(), &end);
-  if (end == tmp.c_str() || *end != '\0') {
-    return false;
-  }
-  out = v;
-  return true;
-}
-
-[[nodiscard]] inline auto parse_u64(std::string_view s, std::uint64_t& out) -> bool {
-  char* end = nullptr;
-  std::string tmp{s};
-  const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10);
-  if (end == tmp.c_str() || *end != '\0') {
-    return false;
-  }
-  out = static_cast<std::uint64_t>(v);
-  return true;
-}
 
 inline void print_usage() {
   std::fputs("usage: probkit bloom [--fp=<p> [--capacity-hint=<n>]] | [--mem-budget=<bytes>]\n", stdout);

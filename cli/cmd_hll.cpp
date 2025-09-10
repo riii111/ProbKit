@@ -1,6 +1,8 @@
 #include "options.hpp"
 #include "probkit/hash.hpp"
 #include "probkit/hll.hpp"
+#include "util/parse.hpp"
+#include "util/spsc_ring.hpp"
 #include "util/string_utils.hpp"
 #include <atomic>
 #include <chrono>
@@ -36,47 +38,13 @@
 #endif
 
 using probkit::cli::CommandResult;
+using probkit::cli::util::parse_u64;
 using probkit::cli::util::sv_starts_with;
 
 namespace probkit::cli {
 
 namespace {
-
-template <typename T> class spsc_ring {
-public:
-  explicit spsc_ring(std::size_t cap) : capacity_(cap), data_(cap) {}
-
-  auto push(const T& v) noexcept -> bool {
-    const std::size_t head = head_.load(std::memory_order_relaxed);
-    const std::size_t next = (head + 1) % capacity_;
-    if (next == tail_.load(std::memory_order_acquire)) {
-      return false; // full
-    }
-    data_[head] = v;
-    head_.store(next, std::memory_order_release);
-    return true;
-  }
-
-  auto pop(T& out) noexcept -> bool {
-    const std::size_t tail = tail_.load(std::memory_order_relaxed);
-    if (tail == head_.load(std::memory_order_acquire)) {
-      return false; // empty
-    }
-    out = std::move(data_[tail]);
-    tail_.store((tail + 1) % capacity_, std::memory_order_release);
-    return true;
-  }
-
-  auto empty() const noexcept -> bool {
-    return tail_.load(std::memory_order_acquire) == head_.load(std::memory_order_acquire);
-  }
-
-private:
-  std::size_t capacity_;
-  std::vector<T> data_;
-  std::atomic<std::size_t> head_{0};
-  std::atomic<std::size_t> tail_{0};
-};
+using probkit::cli::util::spsc_ring;
 
 struct HllOptions {
   bool show_help{false};
@@ -86,17 +54,6 @@ struct HllOptions {
 
 inline void print_help() {
   std::fputs("usage: probkit hll [--precision=<p>]\n", stdout);
-}
-
-[[nodiscard]] inline auto parse_u64(std::string_view s, std::uint64_t& out) -> bool {
-  char* end = nullptr;
-  std::string tmp{s};
-  const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10);
-  if (end == tmp.c_str() || *end != '\0') {
-    return false;
-  }
-  out = static_cast<std::uint64_t>(v);
-  return true;
 }
 
 auto parse_hll_opts(int argc, char** argv) -> HllOptions {
@@ -128,7 +85,7 @@ struct LineItem {
 
 struct InputPair;
 static auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool;
-static void dispatch_line(spsc_ring<LineItem>& ring, std::string&& line);
+static void dispatch_line(spsc_ring<LineItem>& ring, std::string& line);
 template <class StopQ> static void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq);
 #if PROBKIT_HAS_JTHREAD
 using WorkerThread = std::jthread;
@@ -241,7 +198,7 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
 namespace probkit::cli {
 namespace {
 inline auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool {
-  if (g.file_path.empty()) {
+  if (g.file_path.empty() || g.file_path == "-") {
     in = &std::cin;
     return true;
   }
@@ -253,12 +210,14 @@ inline auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istr
   in = &file_in;
   return true;
 }
-inline void dispatch_line(spsc_ring<LineItem>& ring, std::string&& line) {
-  LineItem item{std::move(line)};
-  while (!ring.push(item)) {
-    std::this_thread::sleep_for(std::chrono::microseconds(50));
+
+inline void dispatch_line(spsc_ring<LineItem>& ring, std::string& line) {
+  using namespace std::chrono_literals;
+  while (!ring.try_emplace(std::move(line))) {
+    std::this_thread::sleep_for(50us);
   }
 }
+
 template <class StopQ> inline void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq) {
   LineItem item;
   while (true) {
@@ -295,7 +254,7 @@ static ReaderThread start_reader(const GlobalOptions& g, const std::vector<spsc_
     while (!rst.stop_requested()) {
       if (!std::getline(*in, line))
         break;
-      dispatch_line(*rings[static_cast<std::size_t>(shard)], std::move(line));
+      dispatch_line(*rings[static_cast<std::size_t>(shard)], line);
       shard = (shard + 1) % num_workers;
       if (g.stop_after && ++processed >= g.stop_after)
         break;
@@ -328,7 +287,7 @@ auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*
       if (!std::getline(*in, line)) {
         break;
       }
-      dispatch_line(*rings[static_cast<std::size_t>(shard)], std::move(line));
+      dispatch_line(*rings[static_cast<std::size_t>(shard)], line);
       shard = (shard + 1) % num_workers;
       if (g.stop_after && ++processed >= g.stop_after) {
         break;

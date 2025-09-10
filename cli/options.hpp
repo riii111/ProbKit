@@ -7,26 +7,11 @@
 
 namespace probkit::cli {
 
-enum class OptionResult : std::uint8_t {
-  HelpShown = 0,
-  Handled = 1,
-  NotHandled = 2,
-  SubcommandStart = 3,
-  Error = 255
-};
+enum class OptionResult : std::uint8_t { HelpShown = 0, Handled = 1, NotHandled = 2, SubcommandStart = 3, Error = 255 };
 
-enum class CommandResult : std::uint8_t {
-  Success = 0,
-  GeneralError = 2,
-  IOError = 3,
-  ConfigError = 5
-};
+enum class CommandResult : std::uint8_t { Success = 0, GeneralError = 2, IOError = 3, ConfigError = 5 };
 
-enum class ExitCode : std::uint8_t {
-  Success = 0,
-  GeneralError = 1,
-  ArgumentError = 2
-};
+enum class ExitCode : std::uint8_t { Success = 0, GeneralError = 1, ArgumentError = 2 };
 
 constexpr auto to_int(OptionResult r) -> int {
   return static_cast<int>(r);
