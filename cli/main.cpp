@@ -34,7 +34,7 @@ auto main(int argc, char** argv) -> int {
       hash_cfg.kind = k;
     } else if (arg == std::string_view{"--hash"} && i + 1 < argc) {
       ++i;
-      std::string_view algo{argv[i]}; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      std::string_view algo{argv[i]};
       HashKind k{};
       if (!parse_hash_kind(algo, k)) {
         std::fputs("error: unknown --hash value\n", stderr);
