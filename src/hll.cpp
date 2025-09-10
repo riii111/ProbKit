@@ -47,8 +47,10 @@ inline auto leading_zeroes_64(std::uint64_t v) noexcept -> int {
 }
 
 inline auto rho_from_hash(std::uint64_t h, std::uint8_t p) noexcept -> std::uint8_t {
-  const int lz = leading_zeroes_64((h << p) | (1ULL << (p - 1))); // all-zero case gives max
-  const int rank = lz + 1;                                        // rho in [1..]
+  // OR with bit (p-1): if the shifted tail is all-zero, CLZ becomes (64-p),
+  // yielding rank = (64 - p) + 1 = max_rho. For non-zero tails it doesn't affect CLZ.
+  const int lz = leading_zeroes_64((h << p) | (1ULL << (p - 1)));
+  const int rank = lz + 1; // rho in [1..]
   const int max_rho = 64 - static_cast<int>(p) + 1;
   return static_cast<std::uint8_t>(rank > max_rho ? max_rho : rank);
 }
@@ -91,10 +93,10 @@ auto sketch::estimate() const noexcept -> result<double> {
   // Small range correction (linear counting) per original HLL
   if (E <= 2.5 * static_cast<double>(m) && zeros > 0) {
     E = static_cast<double>(m) * std::log(static_cast<double>(m) / static_cast<double>(zeros));
-  } else if (E > (1.0 / 30.0) * 18446744073709551616.0) { // 2^64 / 30
-    // Large range correction using 64-bit hash space saturation
-    const double two64 = 18446744073709551616.0; // 2^64
-    E = -two64 * std::log(1.0 - (E / two64));
+  } else if (E > (1.0 / 30.0) * 4294967296.0) { // 2^32 / 30
+    // Large-range correction (compat: many HLL impls base this on 2^32)
+    const double two32 = 4294967296.0;
+    E = -two32 * std::log(1.0 - (E / two32));
   }
   return E;
 }

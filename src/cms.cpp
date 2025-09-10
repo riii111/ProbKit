@@ -2,9 +2,6 @@
 #include "probkit/error.hpp"
 #include <algorithm>
 #include <cmath>
-#if __has_include(<numbers>)
-#include <numbers>
-#endif
 
 using probkit::errc;
 using probkit::make_error;
@@ -19,8 +16,7 @@ inline auto compute_dims(double eps, double delta) -> std::pair<std::size_t, std
   if (!(eps > 0.0) || !(eps < 1.0) || !(delta > 0.0) || !(delta < 1.0)) {
     return {0, 0};
   }
-  const double e_const = std::numbers::e;
-  const double w_d = std::ceil(e_const / eps);
+  const double w_d = std::ceil(std::exp(1.0) / eps);
   const double d_d = std::ceil(std::log(1.0 / delta));
   const auto w = static_cast<std::size_t>(w_d);
   const auto d = static_cast<std::size_t>(d_d);
