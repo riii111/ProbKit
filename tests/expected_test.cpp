@@ -10,7 +10,8 @@ using probkit::result;
 
 namespace tests {
 void run_hash_tests();
-}
+void run_bloom_tests();
+} // namespace tests
 
 static void copy_move_value() {
   result<std::string> a{std::string("ok")};
@@ -46,6 +47,7 @@ auto main() -> int {
     copy_move_error();
     error_context();
     tests::run_hash_tests();
+    tests::run_bloom_tests();
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "unexpected exception: %s\n", e.what());
