@@ -4,6 +4,7 @@
 #include "util/parse.hpp"
 #include "util/spsc_ring.hpp"
 #include "util/string_utils.hpp"
+#include "util/threads.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -115,8 +116,7 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     return CommandResult::ConfigError;
   }
 
-  const int worker_count = (g.threads > 0) ? g.threads : static_cast<int>(std::thread::hardware_concurrency());
-  const int num_workers = worker_count > 0 ? worker_count : 1;
+  const int num_workers = probkit::cli::util::decide_num_workers(g.threads);
   const std::size_t ring_capacity = 1U << 14; // 16384 slots
 
   std::vector<spsc_ring<LineItem>*> rings;

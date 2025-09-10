@@ -4,6 +4,7 @@
 #include "util/parse.hpp"
 #include "util/spsc_ring.hpp"
 #include "util/string_utils.hpp"
+#include "util/threads.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -64,18 +65,142 @@ struct Rings {
   std::vector<spsc_ring<LineItem>*> views;
 };
 
-inline auto decide_num_workers(int requested) -> int {
-  if (requested > 0) {
-    return requested;
-  }
-  const int hw = static_cast<int>(std::thread::hardware_concurrency());
-  return (hw > 0) ? hw : 1;
-}
-
 struct RingConfig {
   std::size_t capacity;
   unsigned int worker_count;
 };
+
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+using StatsThread = std::jthread;
+using WorkerThread = std::jthread;
+using ReaderThread = std::jthread;
+#else
+using StatsThread = std::thread;
+using WorkerThread = std::thread;
+using ReaderThread = std::thread;
+#endif
+
+auto make_rings(const RingConfig& config) -> Rings;
+void print_dims(FILE* out, const probkit::cms::sketch& sk);
+void print_help();
+void json_escape_and_print(FILE* out, std::string_view s);
+template <class Items> void print_topk_json(FILE* out, const Items& items);
+void dispatch_line(spsc_ring<LineItem>& ring, std::string& line);
+auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool;
+auto build_locals(int num_workers, const CmsOptions& co, const GlobalOptions& g, std::vector<probkit::cms::sketch>& out)
+    -> bool;
+auto parse_cms_opts(int argc, char** argv) -> CmsOptions;
+template <class StopQ> void worker_loop(spsc_ring<LineItem>& ring, probkit::cms::sketch& sk, StopQ stopq);
+void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::cms::sketch& sk,
+                  std::atomic<bool>& done);
+auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
+                  std::atomic<bool>& done, std::atomic<std::uint64_t>& processed_total) -> ReaderThread;
+auto start_stats_if_enabled(const GlobalOptions& g, std::atomic<bool>& done,
+                            std::atomic<std::uint64_t>& processed_total, StatsThread& thr_out) -> bool;
+
+} // namespace
+
+auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
+  const CmsOptions co = parse_cms_opts(argc, argv);
+  if (co.show_help) {
+    print_help();
+    return CommandResult::Success;
+  }
+
+  auto global_r =
+      probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, g.hash);
+  if (!global_r) {
+    std::fputs("error: failed to init cms\n", stderr);
+    return CommandResult::ConfigError;
+  }
+
+  const int num_workers = util::decide_num_workers(g.threads);
+  const std::size_t ring_capacity = 1U << 14;
+
+  auto rings =
+      make_rings(RingConfig{.capacity = ring_capacity, .worker_count = static_cast<unsigned int>(num_workers)});
+
+  // Thread-local sketches
+  std::vector<probkit::cms::sketch> locals;
+  if (!build_locals(num_workers, co, g, locals)) {
+    std::fputs("error: failed to init worker cms\n", stderr);
+    return CommandResult::ConfigError;
+  }
+
+  std::atomic<bool> done{false};
+  std::atomic<std::uint64_t> processed_total{0};
+
+  // Workers
+  std::vector<WorkerThread> workers;
+  workers.reserve(static_cast<std::size_t>(num_workers));
+  for (int wi = 0; wi < num_workers; ++wi) {
+    spawn_worker(workers, *rings.views[static_cast<std::size_t>(wi)], locals[static_cast<std::size_t>(wi)], done);
+  }
+
+  ReaderThread reader = start_reader(g, rings.views, num_workers, done, processed_total);
+
+  // Optional periodic stats
+  StatsThread stats_thr;
+  const bool stats_enabled = start_stats_if_enabled(g, done, processed_total, stats_thr);
+
+  // Wait and finalize
+  reader.join();
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+  for (auto& w : workers) {
+    w.request_stop();
+  }
+  if (stats_enabled) {
+    stats_thr.request_stop();
+  }
+#else
+  for (auto& w : workers) {
+    w.join();
+  }
+#endif
+  if (stats_enabled) {
+#if !(PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN)
+    if (stats_thr.joinable()) {
+      stats_thr.join();
+    }
+#endif
+  }
+
+  // Reducer: merge locals
+  auto global = std::move(global_r.value());
+  for (auto& tl : locals) {
+    (void)global.merge(tl);
+  }
+
+  // Output
+  if (co.topk > 0) {
+    auto r = global.topk(co.topk);
+    if (!r) {
+      std::fputs("error: cms topk failed\n", stderr);
+      return CommandResult::ConfigError;
+    }
+    const auto& items = r.value();
+    if (g.json) {
+      print_topk_json(stdout, items);
+    } else {
+      for (const auto& it : items) {
+        std::fprintf(stdout, "%s\t%llu\n", it.key.c_str(), static_cast<unsigned long long>(it.est));
+      }
+    }
+  } else {
+    if (g.json) {
+      print_dims(stdout, global);
+    } else {
+      std::fputs("cms: processed\n", stdout);
+    }
+  }
+  return CommandResult::Success;
+}
+
+} // namespace probkit::cli
+
+// ==================== Details (helper implementations) ====================
+namespace probkit::cli {
+namespace {
 
 inline auto make_rings(const RingConfig& config) -> Rings {
   Rings r{};
@@ -186,12 +311,6 @@ inline auto build_locals(int num_workers, const CmsOptions& co, const GlobalOpti
   return true;
 }
 
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-using StatsThread = std::jthread;
-#else
-using StatsThread = std::thread;
-#endif
-
 inline auto start_stats_if_enabled(const GlobalOptions& g, std::atomic<bool>& done,
                                    std::atomic<std::uint64_t>& processed_total, StatsThread& thr_out) -> bool {
   if (!g.stats) {
@@ -276,35 +395,17 @@ template <class StopQ> inline void worker_loop(spsc_ring<LineItem>& ring, probki
 }
 
 #if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-using WorkerThread = std::jthread;
-using ReaderThread = std::jthread;
-#else
-using WorkerThread = std::thread;
-using ReaderThread = std::thread;
-#endif
-
-inline void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::cms::sketch& sk,
-                         std::atomic<bool>& done) {
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::cms::sketch& sk,
+                  std::atomic<bool>& done) {
   ws.emplace_back([&](std::stop_token st) {
     auto stopq = [&]() -> bool { return done.load(std::memory_order_acquire) || st.stop_requested(); };
     worker_loop(ring, sk, stopq);
   });
-#else
-  ws.emplace_back([&]() -> void {
-    auto stopq = [&]() -> bool { return done.load(std::memory_order_acquire); };
-    worker_loop(ring, sk, stopq);
-  });
-#endif
 }
 
-inline auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
-                         std::atomic<bool>& done, std::atomic<std::uint64_t>& processed_total) -> ReaderThread {
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
+                  std::atomic<bool>& done, std::atomic<std::uint64_t>& processed_total) -> ReaderThread {
   return ReaderThread([&](std::stop_token rst) {
-#else
-  return ReaderThread([&]() -> void {
-#endif
     std::ifstream file_in;
     std::istream* in = nullptr;
     if (!open_input(g, file_in, in)) {
@@ -315,13 +416,7 @@ inline auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<Lin
     line.reserve(256);
     std::uint64_t processed = 0;
     int shard = 0;
-    while (
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-        !rst.stop_requested()
-#else
-        true
-#endif
-    ) {
+    while (!rst.stop_requested()) {
       if (!std::getline(*in, line)) {
         break;
       }
@@ -335,104 +430,42 @@ inline auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<Lin
     done.store(true, std::memory_order_release);
   });
 }
-
-} // namespace
-
-auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
-  const CmsOptions co = parse_cms_opts(argc, argv);
-  if (co.show_help) {
-    print_help();
-    return CommandResult::Success;
-  }
-
-  auto global_r =
-      probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, g.hash);
-  if (!global_r) {
-    std::fputs("error: failed to init cms\n", stderr);
-    return CommandResult::ConfigError;
-  }
-
-  const int num_workers = decide_num_workers(g.threads);
-  const std::size_t ring_capacity = 1U << 14;
-
-  auto rings =
-      make_rings(RingConfig{.capacity = ring_capacity, .worker_count = static_cast<unsigned int>(num_workers)});
-
-  // Thread-local sketches
-  std::vector<probkit::cms::sketch> locals;
-  if (!build_locals(num_workers, co, g, locals)) {
-    std::fputs("error: failed to init worker cms\n", stderr);
-    return CommandResult::ConfigError;
-  }
-
-  std::atomic<bool> done{false};
-  std::atomic<std::uint64_t> processed_total{0};
-
-  // Workers
-  std::vector<WorkerThread> workers;
-  workers.reserve(static_cast<std::size_t>(num_workers));
-  for (int wi = 0; wi < num_workers; ++wi) {
-    spawn_worker(workers, *rings.views[static_cast<std::size_t>(wi)], locals[static_cast<std::size_t>(wi)], done);
-  }
-
-  // Reader
-  ReaderThread reader = start_reader(g, rings.views, num_workers, done, processed_total);
-
-  // Optional periodic stats
-  StatsThread stats_thr;
-  const bool stats_enabled = start_stats_if_enabled(g, done, processed_total, stats_thr);
-
-  // Wait and finalize
-  reader.join();
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-  for (auto& w : workers) {
-    w.request_stop();
-  }
-  if (stats_enabled) {
-    stats_thr.request_stop();
-  }
 #else
-  for (auto& w : workers) {
-    w.join();
-  }
-#endif
-  if (stats_enabled) {
-#if !(PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN)
-    if (stats_thr.joinable()) {
-      stats_thr.join();
-    }
-#endif
-  }
-
-  // Reducer: merge locals
-  auto global = std::move(global_r.value());
-  for (auto& tl : locals) {
-    (void)global.merge(tl);
-  }
-
-  // Output
-  if (co.topk > 0) {
-    auto r = global.topk(co.topk);
-    if (!r) {
-      std::fputs("error: cms topk failed\n", stderr);
-      return CommandResult::ConfigError;
-    }
-    const auto& items = r.value();
-    if (g.json) {
-      print_topk_json(stdout, items);
-    } else {
-      for (const auto& it : items) {
-        std::fprintf(stdout, "%s\t%llu\n", it.key.c_str(), static_cast<unsigned long long>(it.est));
-      }
-    }
-  } else {
-    if (g.json) {
-      print_dims(stdout, global);
-    } else {
-      std::fputs("cms: processed\n", stdout);
-    }
-  }
-  return CommandResult::Success;
+void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::cms::sketch& sk,
+                  std::atomic<bool>& done) {
+  ws.emplace_back([&]() -> void {
+    auto stopq = [&]() -> bool { return done.load(std::memory_order_acquire); };
+    worker_loop(ring, sk, stopq);
+  });
 }
 
+auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
+                  std::atomic<bool>& done, std::atomic<std::uint64_t>& processed_total) -> ReaderThread {
+  return ReaderThread([&]() -> void {
+    std::ifstream file_in;
+    std::istream* in = nullptr;
+    if (!open_input(g, file_in, in)) {
+      done.store(true, std::memory_order_release);
+      return;
+    }
+    std::string line;
+    line.reserve(256);
+    std::uint64_t processed = 0;
+    int shard = 0;
+    while (true) {
+      if (!std::getline(*in, line)) {
+        break;
+      }
+      dispatch_line(*rings[static_cast<std::size_t>(shard)], line);
+      shard = (shard + 1) % num_workers;
+      processed_total.fetch_add(1, std::memory_order_relaxed);
+      if (g.stop_after && ++processed >= g.stop_after) {
+        break;
+      }
+    }
+    done.store(true, std::memory_order_release);
+  });
+}
+#endif
+} // namespace
 } // namespace probkit::cli
