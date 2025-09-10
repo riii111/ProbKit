@@ -1,7 +1,9 @@
 #include "probkit/bloom.hpp"
 #include <cmath>
 #include <cstring>
+#if __has_include(<numbers>)
 #include <numbers>
+#endif
 #include <vector>
 
 using probkit::errc;
@@ -15,7 +17,12 @@ namespace probkit::bloom {
 namespace {
 constexpr std::size_t kMinBytes = 8;          // at least one 64-bit word
 constexpr std::size_t kCapacityHint = 100000; // default n for make_by_fp
-constexpr double kLn2 = std::numbers::ln2;
+#if defined(__cpp_lib_math_constants) && (__cpp_lib_math_constants >= 201907L)
+constexpr double kLn2 = std::numbers::ln2; // prefer standard constant when available
+#else
+// Fallback when <numbers> is unavailable in the toolchain
+constexpr double kLn2 = 0.693147180559945309; // ln(2)  // NOLINT
+#endif
 
 inline auto round_up_bits_to_words(std::size_t bits) -> std::size_t {
   return (bits + 63U) / 64U; // number of 64-bit words
@@ -37,10 +44,10 @@ auto filter::make_by_mem(std::size_t bytes, HashConfig h) -> result<filter> {
 }
 
 auto filter::make_by_fp(double p, HashConfig h) -> result<filter> {
-  return make_by_fp(p, kCapacityHint, h);
+  return make_by_fp(p, h, kCapacityHint);
 }
 
-auto filter::make_by_fp(double p, std::size_t capacity_hint, HashConfig h) -> result<filter> {
+auto filter::make_by_fp(double p, HashConfig h, std::size_t capacity_hint) -> result<filter> {
   if (!(p > 0.0) || !(p < 1.0)) {
     return result<filter>::from_error(make_error(errc::invalid_argument, "fp out of range"));
   }

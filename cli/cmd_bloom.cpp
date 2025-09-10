@@ -122,7 +122,7 @@ inline auto make_filter_from(const BloomOptions& opt, const hashing::HashConfig&
     -> probkit::result<probkit::bloom::filter> {
   if (opt.have_fp) {
     if (opt.have_cap) {
-      return probkit::bloom::filter::make_by_fp(opt.fp, static_cast<std::size_t>(opt.cap), h);
+      return probkit::bloom::filter::make_by_fp(opt.fp, h, static_cast<std::size_t>(opt.cap));
     }
     return probkit::bloom::filter::make_by_fp(opt.fp, h);
   }

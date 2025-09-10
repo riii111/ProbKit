@@ -24,7 +24,7 @@ public:
   auto operator=(const filter&) -> filter& = delete;
 
   [[nodiscard]] static auto make_by_fp(double p, hashing::HashConfig h = {}) -> result<filter>;
-  [[nodiscard]] static auto make_by_fp(double p, std::size_t capacity_hint, hashing::HashConfig h) -> result<filter>;
+  [[nodiscard]] static auto make_by_fp(double p, hashing::HashConfig h, std::size_t capacity_hint) -> result<filter>;
   [[nodiscard]] static auto make_by_mem(std::size_t bytes, hashing::HashConfig h = {}) -> result<filter>;
 
   [[nodiscard]] auto add(std::string_view x) noexcept -> result<void>;
