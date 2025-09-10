@@ -18,6 +18,10 @@ auto main(int argc, char** argv) -> int {
   // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   for (int i = 1; i < argc; ++i) {
     std::string_view arg{argv[i]};
+    // Parse globals only before the subcommand to avoid capturing subcommand-specific flags as globals
+    if (arg.empty() || arg.front() != '-') {
+      break;
+    }
     if (arg.size() >= kHashEqLen && arg.compare(0, kHashEqLen, kHashEq) == 0) {
       const std::size_t val_len = arg.size() - kHashEqLen;
       if (val_len == 0) {

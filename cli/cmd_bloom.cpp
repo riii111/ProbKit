@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace probkit::cli {
 
@@ -19,6 +20,11 @@ struct BloomOptions {
   std::uint64_t cap{0};
 };
 
+// Option prefixes to avoid magic numbers for substr offsets
+constexpr std::string_view kFP = "--fp=";
+constexpr std::string_view kCAP = "--capacity-hint=";
+constexpr std::string_view kMEM = "--mem-budget=";
+
 // C++20 portability: prefer std::string_view::starts_with when available.
 // Fallback to compare() to support older libstdc++/libc++.
 constexpr auto sv_starts_with(std::string_view s, std::string_view prefix) noexcept -> bool {
@@ -29,7 +35,7 @@ constexpr auto sv_starts_with(std::string_view s, std::string_view prefix) noexc
 #endif
 }
 
-inline auto parse_double(std::string_view s, double& out) -> bool {
+[[nodiscard]] inline auto parse_double(std::string_view s, double& out) -> bool {
   char* end = nullptr;
   std::string tmp{s};
   const double v = std::strtod(tmp.c_str(), &end);
@@ -40,7 +46,7 @@ inline auto parse_double(std::string_view s, double& out) -> bool {
   return true;
 }
 
-inline auto parse_u64(std::string_view s, std::uint64_t& out) -> bool {
+[[nodiscard]] inline auto parse_u64(std::string_view s, std::uint64_t& out) -> bool {
   char* end = nullptr;
   std::string tmp{s};
   const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10); // NOLINT
@@ -55,95 +61,61 @@ inline void print_usage() {
   std::fputs("usage: probkit bloom [--fp=<p> [--capacity-hint=<n>]] | [--mem-budget=<bytes>]\n", stdout);
 }
 
+auto parse_bloom_options(const std::vector<std::string_view>& args) -> BloomOptions;
+
 auto parse_bloom_options(int argc, char** argv) -> BloomOptions {
-  BloomOptions o{};
+  std::vector<std::string_view> args;
+  args.reserve(static_cast<std::size_t>(argc));
   // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   for (int i = 0; i < argc; ++i) {
-    std::string_view a{argv[i]};
-    if (a == std::string_view{"--help"}) {
-      o.show_help = true;
-      break;
-    }
-    if (sv_starts_with(a, "--fp=")) {
-      double v = 0.0;
-      if (!parse_double(a.substr(5), v)) {
-        std::fputs("error: invalid --fp\n", stderr);
-        o.show_help = true;
-        break;
-      }
-      o.fp = v;
-      o.have_fp = true;
-      continue;
-    }
-    if (sv_starts_with(a, "--capacity-hint=")) {
-      std::uint64_t v = 0;
-      if (!parse_u64(a.substr(16), v)) {
-        std::fputs("error: invalid --capacity-hint\n", stderr);
-        o.show_help = true;
-        break;
-      }
-      o.cap = v;
-      o.have_cap = true;
-      continue;
-    }
-    if (sv_starts_with(a, "--mem-budget=")) {
-      std::uint64_t v = 0;
-      if (!parse_u64(a.substr(13), v)) {
-        std::fputs("error: invalid --mem-budget\n", stderr);
-        o.show_help = true;
-        break;
-      }
-      o.mem = v;
-      o.have_mem = true;
-      continue;
-    }
+    args.emplace_back(argv[i]);
   }
   // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-  return o;
+  return parse_bloom_options(args);
 }
 
 auto parse_bloom_options(const std::vector<std::string_view>& args) -> BloomOptions {
-  BloomOptions o{};
-  for (auto a : args) {
-    if (a == std::string_view{"--help"}) {
-      o.show_help = true;
+  BloomOptions opts{};
+  for (auto arg : args) {
+    if (arg == std::string_view{"--help"}) {
+      opts.show_help = true;
       break;
     }
-    if (sv_starts_with(a, "--fp=")) {
-      double v = 0.0;
-      if (!parse_double(a.substr(5), v)) {
+    if (sv_starts_with(arg, kFP)) {
+      double value = 0.0;
+      if (!parse_double(arg.substr(kFP.size()), value)) {
         std::fputs("error: invalid --fp\n", stderr);
-        o.show_help = true;
+        opts.show_help = true;
         break;
       }
-      o.fp = v;
-      o.have_fp = true;
+      opts.fp = value;
+      opts.have_fp = true;
       continue;
     }
-    if (sv_starts_with(a, "--capacity-hint=")) {
-      std::uint64_t v = 0;
-      if (!parse_u64(a.substr(16), v)) {
+    if (sv_starts_with(arg, kCAP)) {
+      std::uint64_t value = 0;
+      if (!parse_u64(arg.substr(kCAP.size()), value)) {
         std::fputs("error: invalid --capacity-hint\n", stderr);
-        o.show_help = true;
+        opts.show_help = true;
         break;
       }
-      o.cap = v;
-      o.have_cap = true;
+      opts.cap = value;
+      opts.have_cap = true;
       continue;
     }
-    if (sv_starts_with(a, "--mem-budget=")) {
-      std::uint64_t v = 0;
-      if (!parse_u64(a.substr(13), v)) {
+    if (sv_starts_with(arg, kMEM)) {
+      std::uint64_t value = 0;
+      if (!parse_u64(arg.substr(kMEM.size()), value)) {
         std::fputs("error: invalid --mem-budget\n", stderr);
-        o.show_help = true;
+        opts.show_help = true;
         break;
       }
-      o.mem = v;
-      o.have_mem = true;
+      opts.mem = value;
+      opts.have_mem = true;
       continue;
     }
   }
-  return o;
+  return opts;
 }
 
 inline auto make_filter_from(const BloomOptions& opt, const hashing::HashConfig& h)
@@ -185,8 +157,8 @@ auto cmd_bloom_sv(const std::vector<std::string_view>& args, const hashing::Hash
     std::fputs("error: --mem-budget must be > 0 (>= 8 recommended)\n", stderr);
     return 2;
   }
-  auto h = default_hash;
-  auto r = make_filter_from(opt, h);
+  const auto hash = default_hash;
+  auto r = make_filter_from(opt, hash);
   if (!r) {
     if (!opt.have_fp && !opt.have_mem) {
       std::fputs("error: missing args (specify --fp or --mem-budget)\n", stderr);
@@ -224,8 +196,8 @@ auto cmd_bloom(int argc, char** argv, const hashing::HashConfig& default_hash) -
     return 2;
   }
 
-  auto h = default_hash;
-  auto r = make_filter_from(opt, h);
+  const auto hash = default_hash;
+  auto r = make_filter_from(opt, hash);
   if (!r) {
     if (!opt.have_fp && !opt.have_mem) {
       std::fputs("error: missing args (specify --fp or --mem-budget)\n", stderr);
