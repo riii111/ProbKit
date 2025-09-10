@@ -1,6 +1,7 @@
 #include "options.hpp"
 #include "probkit/hash.hpp"
 #include "util/string_utils.hpp"
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -17,16 +18,13 @@ namespace probkit::cli {} // namespace probkit::cli
 
 namespace {
 
-// Safe argv access to avoid pointer arithmetic warnings
 inline auto safe_argv_at(char** argv, int argc, int index) -> char* {
   if (index >= 0 && index < argc) {
-    // Use std::next to avoid direct pointer arithmetic
     return *std::next(argv, index);
   }
   return nullptr;
 }
 
-// Safe argv pointer access for subcommands
 inline auto safe_argv_from(char** argv, int argc, int start_index) -> char** {
   if (start_index >= 0 && start_index < argc) {
     return std::next(argv, start_index);
@@ -70,6 +68,135 @@ inline void print_root_help() {
   return true;
 }
 
+using HandlerFn = int (*)(std::string_view, probkit::cli::GlobalOptions&);
+
+inline auto handle_json(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (a == "--json") {
+    g.json = true;
+    return 1;
+  }
+  return 2;
+}
+inline auto handle_threads(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (!sv_starts_with(a, "--threads=")) {
+    return 2;
+  }
+  std::uint64_t v = 0;
+  auto val = a;
+  val.remove_prefix(std::string_view{"--threads="}.size());
+  if (!parse_u64(val, v) || v == 0 || v > 1024) {
+    std::fputs("error: invalid --threads value\n", stderr);
+    return -1;
+  }
+  g.threads = static_cast<int>(v);
+  return 1;
+}
+inline auto handle_file(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (!sv_starts_with(a, "--file=")) {
+    return 2;
+  }
+  auto val = a;
+  val.remove_prefix(std::string_view{"--file="}.size());
+  g.file_path = std::string(val);
+  return 1;
+}
+inline auto handle_hash(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (!sv_starts_with(a, "--hash=")) {
+    return 2;
+  }
+  auto algo = a;
+  algo.remove_prefix(std::string_view{"--hash="}.size());
+  probkit::hashing::HashKind k{};
+  if (!parse_hash_kind(algo, k)) {
+    std::fputs("error: unknown --hash value\n", stderr);
+    return -1;
+  }
+  g.hash.kind = k;
+  return 1;
+}
+inline auto handle_stop_after(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (!sv_starts_with(a, "--stop-after=")) {
+    return 2;
+  }
+  std::uint64_t v = 0;
+  auto val = a;
+  val.remove_prefix(std::string_view{"--stop-after="}.size());
+  if (!parse_u64(val, v)) {
+    std::fputs("error: invalid --stop-after value\n", stderr);
+    return -1;
+  }
+  g.stop_after = v;
+  return 1;
+}
+inline auto handle_stats(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (a == "--stats") {
+    g.stats = true;
+    g.stats_interval_seconds = 5U;
+    return 1;
+  }
+  if (sv_starts_with(a, "--stats=")) {
+    std::uint64_t v = 0;
+    auto val = a;
+    val.remove_prefix(std::string_view{"--stats="}.size());
+    if (!parse_u64(val, v) || v == 0 || v > 3600) {
+      std::fputs("error: invalid --stats value (1..3600)\n", stderr);
+      return -1;
+    }
+    g.stats = true;
+    g.stats_interval_seconds = static_cast<unsigned>(v);
+    return 1;
+  }
+  return 2;
+}
+inline auto handle_bucket(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (!sv_starts_with(a, "--bucket=")) {
+    return 2;
+  }
+  auto val = a;
+  val.remove_prefix(std::string_view{"--bucket="}.size());
+  if (val.empty()) {
+    std::fputs("error: invalid --bucket value\n", stderr);
+    return -1;
+  }
+  g.bucket = std::string(val);
+  return 1;
+}
+inline auto handle_prom(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (a == "--prom") {
+    g.prom = true;
+    g.prom_path.clear();
+    return 1;
+  }
+  if (sv_starts_with(a, "--prom=")) {
+    auto val = a;
+    val.remove_prefix(std::string_view{"--prom="}.size());
+    g.prom = true;
+    g.prom_path = std::string(val);
+    return 1;
+  }
+  return 2;
+}
+constexpr std::array<HandlerFn, 8> kGlobalHandlers{handle_json,       handle_threads, handle_file,   handle_hash,
+                                                   handle_stop_after, handle_stats,   handle_bucket, handle_prom};
+
+inline auto process_global_option(std::string_view a, probkit::cli::GlobalOptions& g) -> int {
+  if (a.empty() || a.front() != '-') {
+    return 3; // subcommand start
+  }
+  if (a == "--help") {
+    print_root_help();
+    return 0;
+  }
+  for (auto fn : kGlobalHandlers) {
+    const int r = fn(a, g);
+    if (r != 2) {
+      return r; // 1=handled / -1=error
+    }
+  }
+  std::fprintf(stderr, "error: unknown option: %.*s\n", (int)a.size(), a.data());
+  return -1;
+}
+
 [[nodiscard]] inline auto parse_global_options(int argc, char** argv, probkit::cli::GlobalOptions& g) -> int {
   using probkit::hashing::HashKind;
 
@@ -80,97 +207,16 @@ inline void print_root_help() {
       break;
     }
     std::string_view a{arg_ptr};
-    if (a.empty() || a.front() != '-') {
-      break; // reached subcommand
+    const int r = process_global_option(a, g);
+    if (r == 0) {
+      return 0; // help shown
     }
-    if (a == std::string_view{"--help"}) {
-      print_root_help();
-      return 0;
+    if (r == -1) {
+      return -1; // error
     }
-    if (a == std::string_view{"--json"}) {
-      g.json = true;
-      continue;
+    if (r == 3) {
+      break; // subcommand reached
     }
-    if (sv_starts_with(a, std::string_view{"--threads="})) {
-      std::uint64_t v = 0;
-      auto val = a;
-      val.remove_prefix(std::string_view{"--threads="}.size());
-      if (!parse_u64(val, v) || v == 0 || v > 1024) {
-        std::fputs("error: invalid --threads value\n", stderr);
-        return -1;
-      }
-      g.threads = static_cast<int>(v);
-      continue;
-    }
-    if (sv_starts_with(a, std::string_view{"--file="})) {
-      auto val = a;
-      val.remove_prefix(std::string_view{"--file="}.size());
-      g.file_path = std::string(val);
-      continue;
-    }
-    if (sv_starts_with(a, std::string_view{"--hash="})) {
-      auto algo = a;
-      algo.remove_prefix(std::string_view{"--hash="}.size());
-      HashKind k{};
-      if (!parse_hash_kind(algo, k)) {
-        std::fputs("error: unknown --hash value\n", stderr);
-        return -1;
-      }
-      g.hash.kind = k;
-      continue;
-    }
-    if (sv_starts_with(a, std::string_view{"--stop-after="})) {
-      std::uint64_t v = 0;
-      auto val = a;
-      val.remove_prefix(std::string_view{"--stop-after="}.size());
-      if (!parse_u64(val, v)) {
-        std::fputs("error: invalid --stop-after value\n", stderr);
-        return -1;
-      }
-      g.stop_after = v;
-      continue;
-    }
-    if (a == std::string_view{"--stats"}) {
-      g.stats = true;
-      g.stats_interval_seconds = 5U;
-      continue;
-    }
-    if (sv_starts_with(a, std::string_view{"--stats="})) {
-      std::uint64_t v = 0;
-      auto val = a;
-      val.remove_prefix(std::string_view{"--stats="}.size());
-      if (!parse_u64(val, v) || v == 0 || v > 3600) {
-        std::fputs("error: invalid --stats value (1..3600)\n", stderr);
-        return -1;
-      }
-      g.stats = true;
-      g.stats_interval_seconds = static_cast<unsigned>(v);
-      continue;
-    }
-    if (sv_starts_with(a, std::string_view{"--bucket="})) {
-      auto val = a;
-      val.remove_prefix(std::string_view{"--bucket="}.size());
-      if (val.empty()) {
-        std::fputs("error: invalid --bucket value\n", stderr);
-        return -1;
-      }
-      g.bucket = std::string(val);
-      continue;
-    }
-    if (a == std::string_view{"--prom"}) {
-      g.prom = true;
-      g.prom_path.clear();
-      continue;
-    }
-    if (sv_starts_with(a, std::string_view{"--prom="})) {
-      auto val = a;
-      val.remove_prefix(std::string_view{"--prom="}.size());
-      g.prom = true;
-      g.prom_path = std::string(val);
-      continue;
-    }
-    std::fprintf(stderr, "error: unknown option: %.*s\n", static_cast<int>(a.size()), a.data());
-    return -1;
   }
   return argi;
 }
