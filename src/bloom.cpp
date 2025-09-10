@@ -1,6 +1,7 @@
 #include "probkit/bloom.hpp"
 #include <cmath>
 #include <cstring>
+#include <numbers>
 #include <vector>
 
 using probkit::errc;
@@ -14,7 +15,7 @@ namespace probkit::bloom {
 namespace {
 constexpr std::size_t kMinBytes = 8;          // at least one 64-bit word
 constexpr std::size_t kCapacityHint = 100000; // default n for make_by_fp
-constexpr double kLn2 = 0.693147180559945309; // ln 2 (no <numbers> dependency)
+constexpr double kLn2 = std::numbers::ln2;
 
 inline auto round_up_bits_to_words(std::size_t bits) -> std::size_t {
   return (bits + 63U) / 64U; // number of 64-bit words

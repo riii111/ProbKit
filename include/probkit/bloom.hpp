@@ -27,28 +27,23 @@ public:
   [[nodiscard]] static auto make_by_fp(double p, std::size_t capacity_hint, hashing::HashConfig h) -> result<filter>;
   [[nodiscard]] static auto make_by_mem(std::size_t bytes, hashing::HashConfig h = {}) -> result<filter>;
 
-  // The view is not retained beyond the call
   [[nodiscard]] auto add(std::string_view x) noexcept -> result<void>;
   // May return false positives; must not return false negatives if constructed successfully
   [[nodiscard]] auto might_contain(std::string_view x) const noexcept -> result<bool>;
-  // Requires identical parameterization (size/k/hash config)
   [[nodiscard]] auto merge(const filter& other) noexcept -> result<void>;
 
-  // Accessors for tests/observability
   [[nodiscard]] auto bit_size() const noexcept -> std::size_t {
     return m_bits_;
   }
   [[nodiscard]] auto k() const noexcept -> std::uint8_t {
     return k_;
   }
-  // For observability/tests/CLI
   [[nodiscard]] auto byte_size() const noexcept -> std::size_t {
     return (m_bits_ + 7U) / 8U;
   }
   [[nodiscard]] auto hash_config() const noexcept -> hashing::HashConfig {
     return hash_cfg_;
   }
-  // Two filters are merge-compatible iff all parameters match.
   [[nodiscard]] auto same_params(const filter& other) const noexcept -> bool {
     return m_bits_ == other.m_bits_ && k_ == other.k_ && hash_cfg_.kind == other.hash_cfg_.kind &&
            hash_cfg_.seed == other.hash_cfg_.seed && hash_cfg_.thread_salt == other.hash_cfg_.thread_salt;
