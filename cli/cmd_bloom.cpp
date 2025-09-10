@@ -1,11 +1,15 @@
+#include "options.hpp"
 #include "probkit/bloom.hpp"
 #include "probkit/hash.hpp"
+#include "util/string_utils.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
+
+using probkit::cli::util::sv_starts_with;
 
 namespace probkit::cli {
 
@@ -20,20 +24,9 @@ struct BloomOptions {
   std::uint64_t cap{0};
 };
 
-// Option prefixes to avoid magic numbers for substr offsets
 constexpr std::string_view kFP = "--fp=";
 constexpr std::string_view kCAP = "--capacity-hint=";
 constexpr std::string_view kMEM = "--mem-budget=";
-
-// C++20 portability: prefer std::string_view::starts_with when available.
-// Fallback to compare() to support older libstdc++/libc++.
-constexpr auto sv_starts_with(std::string_view s, std::string_view prefix) noexcept -> bool {
-#if defined(__cpp_lib_starts_ends_with) && (__cpp_lib_starts_ends_with >= 201711L)
-  return s.starts_with(prefix);
-#else
-  return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
-#endif
-}
 
 [[nodiscard]] inline auto parse_double(std::string_view s, double& out) -> bool {
   char* end = nullptr;
@@ -49,7 +42,7 @@ constexpr auto sv_starts_with(std::string_view s, std::string_view prefix) noexc
 [[nodiscard]] inline auto parse_u64(std::string_view s, std::uint64_t& out) -> bool {
   char* end = nullptr;
   std::string tmp{s};
-  const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10); // NOLINT
+  const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10);
   if (end == tmp.c_str() || *end != '\0') {
     return false;
   }
@@ -172,7 +165,7 @@ auto cmd_bloom_sv(const std::vector<std::string_view>& args, const hashing::Hash
   return 0;
 }
 
-auto cmd_bloom(int argc, char** argv, const hashing::HashConfig& default_hash) -> int {
+auto cmd_bloom(int argc, char** argv, const GlobalOptions& g) -> int {
   const BloomOptions opt = parse_bloom_options(argc, argv);
   if (opt.show_help) {
     print_usage();
@@ -196,7 +189,7 @@ auto cmd_bloom(int argc, char** argv, const hashing::HashConfig& default_hash) -
     return 2;
   }
 
-  const auto hash = default_hash;
+  const auto hash = g.hash;
   auto r = make_filter_from(opt, hash);
   if (!r) {
     if (!opt.have_fp && !opt.have_mem) {
@@ -207,8 +200,11 @@ auto cmd_bloom(int argc, char** argv, const hashing::HashConfig& default_hash) -
     return 2;
   }
   probkit::bloom::filter f = std::move(r.value());
-
-  std::fprintf(stdout, "bloom: m_bits=%zu k=%u\n", f.bit_size(), static_cast<unsigned>(f.k()));
+  if (g.json) {
+    std::fprintf(stdout, "{\"m_bits\":%zu,\"k\":%u}\n", f.bit_size(), static_cast<unsigned>(f.k()));
+  } else {
+    std::fprintf(stdout, "bloom: m_bits=%zu k=%u\n", f.bit_size(), static_cast<unsigned>(f.k()));
+  }
   return 0;
 }
 
