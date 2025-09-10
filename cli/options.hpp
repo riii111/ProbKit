@@ -8,24 +8,24 @@
 namespace probkit::cli {
 
 enum class OptionResult : std::uint8_t {
-  HelpShown = 0,       // ヘルプ表示済み
-  Handled = 1,         // 正常処理完了
-  NotHandled = 2,      // このハンドラーでは処理できない
-  SubcommandStart = 3, // サブコマンド開始
-  Error = 255          // エラー（-1の代わりに255を使用）
+  HelpShown = 0,
+  Handled = 1,
+  NotHandled = 2,
+  SubcommandStart = 3,
+  Error = 255
 };
 
 enum class CommandResult : std::uint8_t {
-  Success = 0,      // 正常終了
-  GeneralError = 2, // 一般的なエラー
-  IOError = 3,      // I/Oエラー
-  ConfigError = 5   // 設定エラー
+  Success = 0,
+  GeneralError = 2,
+  IOError = 3,
+  ConfigError = 5
 };
 
 enum class ExitCode : std::uint8_t {
-  Success = 0,      // 正常終了
-  GeneralError = 1, // 一般的なエラー
-  ArgumentError = 2 // 引数エラー
+  Success = 0,
+  GeneralError = 1,
+  ArgumentError = 2
 };
 
 constexpr auto to_int(OptionResult r) -> int {
