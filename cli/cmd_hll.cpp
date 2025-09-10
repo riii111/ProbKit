@@ -19,7 +19,7 @@
 #include <vector>
 
 // Feature-detect stop_token/jthread
-#if defined(__has_include)
+#ifdef __has_include
 #if __has_include(<stop_token>)
 #define PROBKIT_HAS_STOP_TOKEN 1
 #else
@@ -39,11 +39,8 @@ using probkit::cli::util::sv_starts_with;
 
 namespace probkit::cli {
 
-// GlobalOptions comes from options.hpp
-
 namespace {
 
-// Minimal fixed-size SPSC ring for pointers to lines (owning storage external)
 template <typename T> class spsc_ring {
 public:
   explicit spsc_ring(std::size_t cap) : capacity_(cap), data_(cap) {}
@@ -124,11 +121,25 @@ auto parse_hll_opts(int argc, char** argv) -> HllOptions {
   // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   return o;
 }
-
 struct LineItem {
   std::string data;
 };
 
+struct InputPair;
+static auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool;
+static void dispatch_line(spsc_ring<LineItem>& ring, std::string&& line);
+template <class StopQ> static void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq);
+#if PROBKIT_HAS_JTHREAD
+using WorkerThread = std::jthread;
+using ReaderThread = std::jthread;
+#else
+using WorkerThread = std::thread;
+using ReaderThread = std::thread;
+#endif
+static void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::hll::sketch& sk,
+                         std::atomic<bool>& done);
+static auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
+                         std::atomic<bool>& done) -> ReaderThread;
 } // namespace
 
 // Reader → Workers → Reducer minimal pipeline for HLL
@@ -184,114 +195,11 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
 #endif
   workers.reserve(static_cast<std::size_t>(num_workers));
   for (int wi = 0; wi < num_workers; ++wi) {
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-    workers.emplace_back([&, wi](std::stop_token st) -> void {
-      LineItem item;
-      auto& ring = *rings[static_cast<std::size_t>(wi)];
-      auto& sk = locals[static_cast<std::size_t>(wi)];
-      while (true) {
-        if (ring.pop(item)) {
-          (void)sk.add(item.data);
-        } else if (done.load(std::memory_order_acquire) || st.stop_requested()) {
-          // Drain complete
-          break;
-        } else {
-          std::this_thread::sleep_for(std::chrono::microseconds(50));
-        }
-      }
-    });
-#else
-    workers.emplace_back([&, wi]() -> void {
-      LineItem item;
-      auto& ring = *rings[static_cast<std::size_t>(wi)];
-      auto& sk = locals[static_cast<std::size_t>(wi)];
-      while (true) {
-        if (ring.pop(item)) {
-          (void)sk.add(item.data);
-        } else if (done.load(std::memory_order_acquire)) {
-          // Drain complete
-          break;
-        } else {
-          std::this_thread::sleep_for(std::chrono::microseconds(50));
-        }
-      }
-    });
-#endif
+    spawn_worker(workers, *rings[static_cast<std::size_t>(wi)], locals[static_cast<std::size_t>(wi)], done);
   }
 
-// Reader
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-  std::jthread reader([&](std::stop_token rst) -> void {
-    // Select input stream
-    std::ifstream file_in;
-    std::istream* in = &std::cin;
-    if (!g.file_path.empty()) {
-      file_in.open(g.file_path, std::ios::in);
-      if (!file_in.is_open()) {
-        std::fputs("error: failed to open --file\n", stderr);
-        done.store(true, std::memory_order_release);
-        return;
-      }
-      in = &file_in;
-    }
-
-    std::string line;
-    line.reserve(256);
-    std::uint64_t processed = 0;
-    int shard = 0;
-    while (!rst.stop_requested()) {
-      if (!std::getline(*in, line)) {
-        break;
-      }
-      LineItem item{line};
-      // Push to ring with simple round-robin sharding
-      auto& ring = *rings[static_cast<std::size_t>(shard)];
-      // backpressure
-      while (!ring.push(item)) {
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
-      }
-      shard = (shard + 1) % num_workers;
-      if (g.stop_after && ++processed >= g.stop_after) {
-        break;
-      }
-    }
-    done.store(true, std::memory_order_release);
-  });
-#else
-  std::thread reader([&]() -> void {
-    std::ifstream file_in;
-    std::istream* in = &std::cin;
-    if (!g.file_path.empty()) {
-      file_in.open(g.file_path, std::ios::in);
-      if (!file_in.is_open()) {
-        std::fputs("error: failed to open --file\n", stderr);
-        done.store(true, std::memory_order_release);
-        return;
-      }
-      in = &file_in;
-    }
-
-    std::string line;
-    line.reserve(256);
-    std::uint64_t processed = 0;
-    int shard = 0;
-    while (true) {
-      if (!std::getline(*in, line)) {
-        break;
-      }
-      LineItem item{line};
-      auto& ring = *rings[static_cast<std::size_t>(shard)];
-      while (!ring.push(item)) {
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
-      }
-      shard = (shard + 1) % num_workers;
-      if (g.stop_after && ++processed >= g.stop_after) {
-        break;
-      }
-    }
-    done.store(true, std::memory_order_release);
-  });
-#endif
+  // Reader
+  ReaderThread reader = start_reader(g, rings, num_workers, done);
 
   // Wait: reader then workers
   reader.join();
@@ -326,4 +234,108 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
   return 0;
 }
 
+} // namespace probkit::cli
+
+// ==================== Details (helper implementations) ====================
+namespace probkit::cli {
+namespace {
+inline auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool {
+  if (g.file_path.empty()) {
+    in = &std::cin;
+    return true;
+  }
+  file_in.open(g.file_path, std::ios::in);
+  if (!file_in.is_open()) {
+    std::fputs("error: failed to open --file\n", stderr);
+    return false;
+  }
+  in = &file_in;
+  return true;
+}
+inline void dispatch_line(spsc_ring<LineItem>& ring, std::string&& line) {
+  LineItem item{std::move(line)};
+  while (!ring.push(item)) {
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+}
+template <class StopQ> inline void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq) {
+  LineItem item;
+  while (true) {
+    if (ring.pop(item)) {
+      (void)sk.add(item.data);
+    } else if (stopq()) {
+      break;
+    } else {
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+  }
+}
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+static void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::hll::sketch& sk,
+                         std::atomic<bool>& done) {
+  ws.emplace_back([&](std::stop_token st) {
+    auto stopq = [&]() -> bool { return done.load(std::memory_order_acquire) || st.stop_requested(); };
+    worker_loop(ring, sk, stopq);
+  });
+}
+static ReaderThread start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings,
+                                 int num_workers, std::atomic<bool>& done) {
+  return ReaderThread([&](std::stop_token rst) {
+    std::ifstream file_in;
+    std::istream* in = nullptr;
+    if (!open_input(g, file_in, in)) {
+      done.store(true, std::memory_order_release);
+      return;
+    }
+    std::string line;
+    line.reserve(256);
+    std::uint64_t processed = 0;
+    int shard = 0;
+    while (!rst.stop_requested()) {
+      if (!std::getline(*in, line))
+        break;
+      dispatch_line(*rings[static_cast<std::size_t>(shard)], std::move(line));
+      shard = (shard + 1) % num_workers;
+      if (g.stop_after && ++processed >= g.stop_after)
+        break;
+    }
+    done.store(true, std::memory_order_release);
+  });
+}
+#else
+void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::hll::sketch& sk,
+                  std::atomic<bool>& done) {
+  ws.emplace_back([&]() -> void {
+    auto stopq = [&]() -> bool { return done.load(std::memory_order_acquire); };
+    worker_loop(ring, sk, stopq);
+  });
+}
+auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
+                  std::atomic<bool>& done) -> ReaderThread {
+  return ReaderThread([&]() -> void {
+    std::ifstream file_in;
+    std::istream* in = nullptr;
+    if (!open_input(g, file_in, in)) {
+      done.store(true, std::memory_order_release);
+      return;
+    }
+    std::string line;
+    line.reserve(256);
+    std::uint64_t processed = 0;
+    int shard = 0;
+    while (true) {
+      if (!std::getline(*in, line)) {
+        break;
+      }
+      dispatch_line(*rings[static_cast<std::size_t>(shard)], std::move(line));
+      shard = (shard + 1) % num_workers;
+      if (g.stop_after && ++processed >= g.stop_after) {
+        break;
+      }
+    }
+    done.store(true, std::memory_order_release);
+  });
+}
+#endif
+} // namespace
 } // namespace probkit::cli
