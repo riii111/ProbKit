@@ -21,7 +21,7 @@ constexpr std::size_t kCapacityHint = 100000; // default n for make_by_fp
 constexpr double kLn2 = std::numbers::ln2; // prefer standard constant when available
 #else
 // Fallback when <numbers> is unavailable in the toolchain
-constexpr double kLn2 = 0.693147180559945309; // ln(2)  // NOLINT
+constexpr double kLn2 = 0.693147180559945309;
 #endif
 
 inline auto round_up_bits_to_words(std::size_t bits) -> std::size_t {

@@ -34,8 +34,8 @@ static void test_hll_basic_accuracy_and_merge() {
 
   const auto m = static_cast<double>(1U << p);
   const double rel = 1.04 / std::sqrt(m);
-  const double lo = static_cast<double>(2 * n) * (1.0 - 5.0 * rel); // NOLINT
-  const double hi = static_cast<double>(2 * n) * (1.0 + 5.0 * rel); // NOLINT
+  const double lo = static_cast<double>(2 * n) * (1.0 - 5.0 * rel);
+  const double hi = static_cast<double>(2 * n) * (1.0 + 5.0 * rel);
   if (v < lo || v > hi) {
     std::fprintf(stderr, "HLL estimate %.2f not in [%.2f, %.2f]\n", v, lo, hi);
   }

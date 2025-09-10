@@ -35,6 +35,7 @@
 #define PROBKIT_HAS_JTHREAD 0
 #endif
 
+using probkit::cli::CommandResult;
 using probkit::cli::util::sv_starts_with;
 
 namespace probkit::cli {
@@ -90,7 +91,7 @@ inline void print_help() {
 [[nodiscard]] inline auto parse_u64(std::string_view s, std::uint64_t& out) -> bool {
   char* end = nullptr;
   std::string tmp{s};
-  const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10); // NOLINT
+  const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10);
   if (end == tmp.c_str() || *end != '\0') {
     return false;
   }
@@ -143,18 +144,18 @@ static auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<Lin
 } // namespace
 
 // Reader → Workers → Reducer minimal pipeline for HLL
-auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
+auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
   const HllOptions ho = parse_hll_opts(argc, argv);
   if (ho.show_help) {
     print_help();
-    return 0;
+    return CommandResult::Success;
   }
 
   const std::uint8_t p = ho.have_precision ? ho.precision : 14;
   auto sketch_r = probkit::hll::sketch::make_by_precision(p, g.hash);
   if (!sketch_r) {
     std::fputs("error: failed to init hll\n", stderr);
-    return 5;
+    return CommandResult::ConfigError;
   }
 
   const int worker_count = (g.threads > 0) ? g.threads : static_cast<int>(std::thread::hardware_concurrency());
@@ -180,7 +181,7 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
     auto s = probkit::hll::sketch::make_by_precision(p, hc);
     if (!s) {
       std::fputs("error: failed to init worker sketch\n", stderr);
-      return 5;
+      return CommandResult::ConfigError;
     }
     locals.emplace_back(std::move(s.value()));
   }
@@ -224,14 +225,14 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> int {
   auto est = global.estimate();
   if (!est) {
     std::fputs("error: hll estimate failed\n", stderr);
-    return 5;
+    return CommandResult::ConfigError;
   }
   if (g.json) {
     std::printf("{\"uu\":%.0f,\"m\":%zu}\n", est.value(), global.m());
   } else {
     std::printf("uu=%.0f m=%zu\n", est.value(), global.m());
   }
-  return 0;
+  return CommandResult::Success;
 }
 
 } // namespace probkit::cli

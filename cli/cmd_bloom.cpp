@@ -5,10 +5,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
+using probkit::cli::CommandResult;
 using probkit::cli::util::sv_starts_with;
 
 namespace probkit::cli {
@@ -127,28 +129,28 @@ inline auto make_filter_from(const BloomOptions& opt, const hashing::HashConfig&
 }
 } // end anonymous namespace
 
-auto cmd_bloom_sv(const std::vector<std::string_view>& args, const hashing::HashConfig& default_hash) -> int {
+auto cmd_bloom_sv(const std::vector<std::string_view>& args, const hashing::HashConfig& default_hash) -> CommandResult {
   const BloomOptions opt = parse_bloom_options(args);
   if (opt.show_help) {
     print_usage();
-    return 0;
+    return CommandResult::Success;
   }
   if (opt.have_fp && opt.have_mem) {
     std::fputs("error: specify either --fp or --mem-budget\n", stderr);
-    return 2;
+    return CommandResult::GeneralError;
   }
   if (opt.have_fp) {
     if (opt.fp <= 0.0 || opt.fp >= 1.0) {
       std::fputs("error: --fp must be in (0,1)\n", stderr);
-      return 2;
+      return CommandResult::GeneralError;
     }
     if (opt.have_cap && opt.cap == 0) {
       std::fputs("error: --capacity-hint must be > 0\n", stderr);
-      return 2;
+      return CommandResult::GeneralError;
     }
   } else if (opt.have_mem && opt.mem == 0) {
     std::fputs("error: --mem-budget must be > 0 (>= 8 recommended)\n", stderr);
-    return 2;
+    return CommandResult::GeneralError;
   }
   const auto hash = default_hash;
   auto r = make_filter_from(opt, hash);
@@ -158,35 +160,44 @@ auto cmd_bloom_sv(const std::vector<std::string_view>& args, const hashing::Hash
     } else {
       std::fputs("error: failed to build bloom filter\n", stderr);
     }
-    return 2;
+    return CommandResult::GeneralError;
   }
   probkit::bloom::filter f = std::move(r.value());
   std::fprintf(stdout, "bloom: m_bits=%zu k=%u\n", f.bit_size(), static_cast<unsigned>(f.k()));
-  return 0;
+  return CommandResult::Success;
 }
 
-auto cmd_bloom(int argc, char** argv, const GlobalOptions& g) -> int {
+auto cmd_bloom(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
   const BloomOptions opt = parse_bloom_options(argc, argv);
   if (opt.show_help) {
     print_usage();
-    return 0;
+    return CommandResult::Success;
+  }
+  // Validate file if provided (non-gz only; gz via zcat is recommended)
+  std::ifstream file_in;
+  if (!g.file_path.empty()) {
+    file_in.open(g.file_path, std::ios::in);
+    if (!file_in.is_open()) {
+      std::fputs("error: failed to open --file\n", stderr);
+      return CommandResult::IOError;
+    }
   }
   if (opt.have_fp && opt.have_mem) {
     std::fputs("error: specify either --fp or --mem-budget\n", stderr);
-    return 2;
+    return CommandResult::GeneralError;
   }
   if (opt.have_fp) {
     if (opt.fp <= 0.0 || opt.fp >= 1.0) {
       std::fputs("error: --fp must be in (0,1)\n", stderr);
-      return 2;
+      return CommandResult::GeneralError;
     }
     if (opt.have_cap && opt.cap == 0) {
       std::fputs("error: --capacity-hint must be > 0\n", stderr);
-      return 2;
+      return CommandResult::GeneralError;
     }
   } else if (opt.have_mem && opt.mem == 0) {
     std::fputs("error: --mem-budget must be > 0 (>= 8 recommended)\n", stderr);
-    return 2;
+    return CommandResult::GeneralError;
   }
 
   const auto hash = g.hash;
@@ -197,7 +208,7 @@ auto cmd_bloom(int argc, char** argv, const GlobalOptions& g) -> int {
     } else {
       std::fputs("error: failed to build bloom filter\n", stderr);
     }
-    return 2;
+    return CommandResult::GeneralError;
   }
   probkit::bloom::filter f = std::move(r.value());
   if (g.json) {
@@ -205,7 +216,7 @@ auto cmd_bloom(int argc, char** argv, const GlobalOptions& g) -> int {
   } else {
     std::fprintf(stdout, "bloom: m_bits=%zu k=%u\n", f.bit_size(), static_cast<unsigned>(f.k()));
   }
-  return 0;
+  return CommandResult::Success;
 }
 
 } // namespace probkit::cli
