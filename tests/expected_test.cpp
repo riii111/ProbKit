@@ -11,6 +11,8 @@ using probkit::result;
 namespace tests {
 void run_hash_tests();
 void run_bloom_tests();
+void run_hll_tests();
+void run_cms_tests();
 } // namespace tests
 
 static void copy_move_value() {
@@ -48,6 +50,8 @@ auto main() -> int {
     error_context();
     tests::run_hash_tests();
     tests::run_bloom_tests();
+    tests::run_hll_tests();
+    tests::run_cms_tests();
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "unexpected exception: %s\n", e.what());
