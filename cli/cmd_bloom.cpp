@@ -172,10 +172,27 @@ auto cmd_bloom_sv(const std::vector<std::string_view>& args, const hashing::Hash
     std::fputs("error: specify either --fp or --mem-budget\n", stderr);
     return 2;
   }
+  if (opt.have_fp) {
+    if (opt.fp <= 0.0 || opt.fp >= 1.0) {
+      std::fputs("error: --fp must be in (0,1)\n", stderr);
+      return 2;
+    }
+    if (opt.have_cap && opt.cap == 0) {
+      std::fputs("error: --capacity-hint must be > 0\n", stderr);
+      return 2;
+    }
+  } else if (opt.have_mem && opt.mem == 0) {
+    std::fputs("error: --mem-budget must be > 0 (>= 8 recommended)\n", stderr);
+    return 2;
+  }
   auto h = default_hash;
   auto r = make_filter_from(opt, h);
   if (!r) {
-    std::fputs("error: failed to build bloom filter\n", stderr);
+    if (!opt.have_fp && !opt.have_mem) {
+      std::fputs("error: missing args (specify --fp or --mem-budget)\n", stderr);
+    } else {
+      std::fputs("error: failed to build bloom filter\n", stderr);
+    }
     return 2;
   }
   probkit::bloom::filter f = std::move(r.value());
@@ -193,11 +210,28 @@ auto cmd_bloom(int argc, char** argv, const hashing::HashConfig& default_hash) -
     std::fputs("error: specify either --fp or --mem-budget\n", stderr);
     return 2;
   }
+  if (opt.have_fp) {
+    if (opt.fp <= 0.0 || opt.fp >= 1.0) {
+      std::fputs("error: --fp must be in (0,1)\n", stderr);
+      return 2;
+    }
+    if (opt.have_cap && opt.cap == 0) {
+      std::fputs("error: --capacity-hint must be > 0\n", stderr);
+      return 2;
+    }
+  } else if (opt.have_mem && opt.mem == 0) {
+    std::fputs("error: --mem-budget must be > 0 (>= 8 recommended)\n", stderr);
+    return 2;
+  }
 
   auto h = default_hash;
   auto r = make_filter_from(opt, h);
   if (!r) {
-    std::fputs("error: failed to build bloom filter\n", stderr);
+    if (!opt.have_fp && !opt.have_mem) {
+      std::fputs("error: missing args (specify --fp or --mem-budget)\n", stderr);
+    } else {
+      std::fputs("error: failed to build bloom filter\n", stderr);
+    }
     return 2;
   }
   probkit::bloom::filter f = std::move(r.value());

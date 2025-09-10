@@ -41,6 +41,18 @@ public:
   [[nodiscard]] auto k() const noexcept -> std::uint8_t {
     return k_;
   }
+  // For observability/tests/CLI
+  [[nodiscard]] auto byte_size() const noexcept -> std::size_t {
+    return (m_bits_ + 7U) / 8U;
+  }
+  [[nodiscard]] auto hash_config() const noexcept -> hashing::HashConfig {
+    return hash_cfg_;
+  }
+  // Two filters are merge-compatible iff all parameters match.
+  [[nodiscard]] auto same_params(const filter& other) const noexcept -> bool {
+    return m_bits_ == other.m_bits_ && k_ == other.k_ && hash_cfg_.kind == other.hash_cfg_.kind &&
+           hash_cfg_.seed == other.hash_cfg_.seed && hash_cfg_.thread_salt == other.hash_cfg_.thread_salt;
+  }
 
 private:
   static constexpr std::uint8_t kDefaultK = 7;

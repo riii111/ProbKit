@@ -56,9 +56,10 @@ static void test_false_positive_rate_matches_theory() {
   const double p_theory =
       fp_theory(static_cast<double>(bf.k()), static_cast<double>(n), static_cast<double>(bf.bit_size()));
 
-  const double abs_tol = 0.01;
-  const double rel_tol = 0.5 * p_theory;
-  const double tol = abs_tol > rel_tol ? abs_tol : rel_tol;
+  // Binomial std error ≈ sqrt(p*(1-p)/N). Use 3σ + small alpha for safety.
+  const double p_for_se = std::max(1e-9, std::min(1.0 - 1e-9, p_theory));
+  const double se = std::sqrt(p_for_se * (1.0 - p_for_se) / static_cast<double>(trials));
+  const double tol = (3.0 * se) + 0.002; // alpha=0.002 absorbs model drift/rounding
   const double diff = std::fabs(rate - p_theory);
   if (diff > tol) {
     std::fprintf(stderr, "FP rate off: measured=%.6f theory=%.6f tol=%.6f\n", rate, p_theory, tol);
@@ -91,10 +92,22 @@ static void test_merge_union_and_no_false_negative() {
   }
 }
 
+static void test_merge_rejects_incompatible() {
+  HashConfig h{};
+  auto a = filter::make_by_mem(16UL * 1024UL, h);
+  auto b = filter::make_by_mem(32UL * 1024UL, h); // different size
+  assert(a.has_value() && b.has_value());
+  filter fa = std::move(a.value());
+  filter fb = std::move(b.value());
+  auto m = fa.merge(fb);
+  assert(!m.has_value()); // must fail
+}
+
 void run_bloom_tests() {
   test_insert_and_query_no_false_negative();
   test_false_positive_rate_matches_theory();
   test_merge_union_and_no_false_negative();
+  test_merge_rejects_incompatible();
 }
 
 } // namespace tests
