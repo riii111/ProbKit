@@ -12,12 +12,12 @@ namespace probkit::cli::util {
 // T should be movable and reasonably small.
 template <typename T> class spsc_ring {
 public:
-  explicit spsc_ring(std::size_t capacity) : capacity_(capacity), data_(capacity) {}
+  explicit spsc_ring(std::size_t capacity) : capacity_(capacity < 2 ? 2 : capacity), data_(capacity_) {}
 
   static_assert(std::is_move_constructible_v<T>, "spsc_ring requires T to be move-constructible");
 
   // Copy-push (kept for API compatibility)
-  auto push(const T& value) noexcept -> bool {
+  [[nodiscard]] auto push(const T& value) noexcept -> bool {
     const std::size_t head = head_.load(std::memory_order_relaxed);
     const std::size_t next = (head + 1) % capacity_;
     if (next == tail_.load(std::memory_order_acquire)) {
@@ -29,7 +29,7 @@ public:
   }
 
   // Move-push to avoid extra string allocations/copies on hot path
-  auto push(T&& value) noexcept -> bool {
+  [[nodiscard]] auto push(T&& value) noexcept -> bool {
     const std::size_t head = head_.load(std::memory_order_relaxed);
     const std::size_t next = (head + 1) % capacity_;
     if (next == tail_.load(std::memory_order_acquire)) {
@@ -42,7 +42,7 @@ public:
 
   // Construct-in-queue only when space is available.
   // Important: Passing std::move(x) here is safe in a retry loop; x is consumed only on success.
-  template <class... Args> auto try_emplace(Args&&... args) noexcept -> bool {
+  template <class... Args> [[nodiscard]] auto try_emplace(Args&&... args) noexcept -> bool {
     const std::size_t head = head_.load(std::memory_order_relaxed);
     const std::size_t next = (head + 1) % capacity_;
     if (next == tail_.load(std::memory_order_acquire)) {
@@ -53,7 +53,7 @@ public:
     return true;
   }
 
-  auto pop(T& out) noexcept -> bool {
+  [[nodiscard]] auto pop(T& out) noexcept -> bool {
     const std::size_t tail = tail_.load(std::memory_order_relaxed);
     if (tail == head_.load(std::memory_order_acquire)) {
       return false; // empty
@@ -63,7 +63,7 @@ public:
     return true;
   }
 
-  auto empty() const noexcept -> bool {
+  [[nodiscard]] auto empty() const noexcept -> bool {
     return tail_.load(std::memory_order_acquire) == head_.load(std::memory_order_acquire);
   }
 

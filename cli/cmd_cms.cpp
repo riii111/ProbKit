@@ -64,6 +64,14 @@ struct Rings {
   std::vector<spsc_ring<LineItem>*> views;
 };
 
+inline auto decide_num_workers(int requested) -> int {
+  if (requested > 0) {
+    return requested;
+  }
+  const int hw = static_cast<int>(std::thread::hardware_concurrency());
+  return (hw > 0) ? hw : 1;
+}
+
 struct RingConfig {
   std::size_t capacity;
   unsigned int worker_count;
@@ -159,6 +167,57 @@ inline auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istr
     return false;
   }
   in = &file_in;
+  return true;
+}
+
+inline auto build_locals(int num_workers, const CmsOptions& co, const GlobalOptions& g,
+                         std::vector<probkit::cms::sketch>& out) -> bool {
+  out.reserve(static_cast<std::size_t>(num_workers));
+  for (int i = 0; i < num_workers; ++i) {
+    probkit::hashing::HashConfig hc = g.hash;
+    const std::uint64_t thread_index = static_cast<std::uint64_t>(i) + 1ULL;
+    hc.thread_salt = probkit::hashing::derive_thread_salt(hc.seed, thread_index);
+    auto s = probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, hc);
+    if (!s) {
+      return false;
+    }
+    out.emplace_back(std::move(s.value()));
+  }
+  return true;
+}
+
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+using StatsThread = std::jthread;
+#else
+using StatsThread = std::thread;
+#endif
+
+inline auto start_stats_if_enabled(const GlobalOptions& g, std::atomic<bool>& done,
+                                   std::atomic<std::uint64_t>& processed_total, StatsThread& thr_out) -> bool {
+  if (!g.stats) {
+    return false;
+  }
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+  thr_out = std::jthread([&](std::stop_token st) {
+#else
+  thr_out = std::thread([&]() -> void {
+#endif
+    const auto interval = std::chrono::seconds(g.stats ? g.stats_interval_seconds : 1U);
+    while (
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+        !st.stop_requested()
+#else
+        true
+#endif
+    ) {
+      std::this_thread::sleep_for(interval);
+      const auto proc = processed_total.load(std::memory_order_relaxed);
+      std::fprintf(stderr, "processed=%llu\n", static_cast<unsigned long long>(proc));
+      if (done.load(std::memory_order_acquire)) {
+        break;
+      }
+    }
+  });
   return true;
 }
 
@@ -293,8 +352,7 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     return CommandResult::ConfigError;
   }
 
-  const int worker_count = (g.threads > 0) ? g.threads : static_cast<int>(std::thread::hardware_concurrency());
-  const int num_workers = worker_count > 0 ? worker_count : 1;
+  const int num_workers = decide_num_workers(g.threads);
   const std::size_t ring_capacity = 1U << 14;
 
   auto rings =
@@ -302,17 +360,9 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
 
   // Thread-local sketches
   std::vector<probkit::cms::sketch> locals;
-  locals.reserve(static_cast<std::size_t>(num_workers));
-  for (int i = 0; i < num_workers; ++i) {
-    probkit::hashing::HashConfig hc = g.hash;
-    const std::uint64_t thread_index = static_cast<std::uint64_t>(i) + 1ULL;
-    hc.thread_salt = probkit::hashing::derive_thread_salt(hc.seed, thread_index);
-    auto s = probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, hc);
-    if (!s) {
-      std::fputs("error: failed to init worker cms\n", stderr);
-      return CommandResult::ConfigError;
-    }
-    locals.emplace_back(std::move(s.value()));
+  if (!build_locals(num_workers, co, g, locals)) {
+    std::fputs("error: failed to init worker cms\n", stderr);
+    return CommandResult::ConfigError;
   }
 
   std::atomic<bool> done{false};
@@ -329,37 +379,8 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
   ReaderThread reader = start_reader(g, rings.views, num_workers, done, processed_total);
 
   // Optional periodic stats
-  // Start only when enabled to reduce overhead & complexity
-  bool stats_enabled = g.stats;
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-  std::jthread stats_thr;
-#else
-  std::thread stats_thr;
-#endif
-  if (stats_enabled) {
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-    stats_thr = std::jthread([&](std::stop_token st) {
-#else
-    stats_thr = std::thread([&]() -> void {
-#endif
-      using std::chrono_literals::operator""s;
-      const auto interval = std::chrono::seconds(g.stats ? g.stats_interval_seconds : 1U);
-      while (
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-          !st.stop_requested()
-#else
-          true
-#endif
-      ) {
-        std::this_thread::sleep_for(interval);
-        const auto proc = processed_total.load(std::memory_order_relaxed);
-        std::fprintf(stderr, "processed=%llu\n", static_cast<unsigned long long>(proc));
-        if (done.load(std::memory_order_acquire)) {
-          break;
-        }
-      }
-    });
-  }
+  StatsThread stats_thr;
+  const bool stats_enabled = start_stats_if_enabled(g, done, processed_total, stats_thr);
 
   // Wait and finalize
   reader.join();

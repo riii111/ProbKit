@@ -19,9 +19,12 @@ using probkit::cli::util::parse_u64;
 using probkit::cli::util::sv_starts_with;
 using probkit::hashing::parse_hash_kind;
 
-namespace probkit::cli {} // namespace probkit::cli
-
 namespace {
+
+struct ParseResult {
+  ExitCode status;
+  int next_index;
+};
 
 inline auto safe_argv_at(char** argv, int argc, int index) -> char* {
   if (index >= 0 && index < argc) {
@@ -198,7 +201,7 @@ inline auto process_global_option(std::string_view a, probkit::cli::GlobalOption
   return OptionResult::Error;
 }
 
-[[nodiscard]] inline auto parse_global_options(int argc, char** argv, probkit::cli::GlobalOptions& g) -> int {
+[[nodiscard]] inline auto parse_global_options(int argc, char** argv, probkit::cli::GlobalOptions& g) -> ParseResult {
   using probkit::hashing::HashKind;
 
   int argi = 1;
@@ -210,17 +213,28 @@ inline auto process_global_option(std::string_view a, probkit::cli::GlobalOption
     std::string_view a{arg_ptr};
     const OptionResult r = process_global_option(a, g);
     if (r == OptionResult::HelpShown) {
-      return to_int(ExitCode::Success);
+      return ParseResult{.status = ExitCode::Success, /*next_index=*/.next_index = -1};
     }
     if (r == OptionResult::Error) {
-      return to_int(ExitCode::ArgumentError);
+      return ParseResult{.status = ExitCode::ArgumentError, /*next_index=*/.next_index = -1};
     }
     if (r == OptionResult::SubcommandStart) {
       break;
     }
   }
-  return argi;
+  return ParseResult{.status = ExitCode::Success, .next_index = argi};
 }
+
+struct SubCmd {
+  std::string_view name;
+  CommandResult (*fn)(int, char**, const probkit::cli::GlobalOptions&);
+};
+
+constexpr std::array<SubCmd, 3> kSubCmds{{
+    {.name = "bloom", .fn = probkit::cli::cmd_bloom},
+    {.name = "hll", .fn = probkit::cli::cmd_hll},
+    {.name = "cms", .fn = probkit::cli::cmd_cms},
+}}; // std::array to avoid C-style array warning
 
 [[nodiscard]] inline auto dispatch_command(int argc, char** argv, int cmd_start, const probkit::cli::GlobalOptions& g)
     -> ExitCode {
@@ -238,17 +252,11 @@ inline auto process_global_option(std::string_view a, probkit::cli::GlobalOption
   const int cmd_argc = argc - cmd_start - 1;
   char** cmd_argv = safe_argv_from(argv, argc, cmd_start + 1);
 
-  if (cmd == std::string_view{"bloom"}) {
-    const CommandResult result = probkit::cli::cmd_bloom(cmd_argc, cmd_argv, g);
-    return (result == CommandResult::Success) ? ExitCode::Success : ExitCode::GeneralError;
-  }
-  if (cmd == std::string_view{"hll"}) {
-    const CommandResult result = probkit::cli::cmd_hll(cmd_argc, cmd_argv, g);
-    return (result == CommandResult::Success) ? ExitCode::Success : ExitCode::GeneralError;
-  }
-  if (cmd == std::string_view{"cms"}) {
-    const CommandResult result = probkit::cli::cmd_cms(cmd_argc, cmd_argv, g);
-    return (result == CommandResult::Success) ? ExitCode::Success : ExitCode::GeneralError;
+  for (const auto& sc : kSubCmds) {
+    if (cmd == sc.name) {
+      const CommandResult r = sc.fn(cmd_argc, cmd_argv, g);
+      return (r == CommandResult::Success) ? ExitCode::Success : ExitCode::GeneralError;
+    }
   }
 
   std::fputs("error: unknown subcommand\n", stderr);
@@ -267,17 +275,17 @@ auto main(int argc, char** argv) -> int {
   }
 
   // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-  const int cmd_start = parse_global_options(argc, argv, g);
+  const ParseResult pr = parse_global_options(argc, argv, g);
 
-  if (cmd_start == to_int(ExitCode::Success)) {
+  if (pr.status == ExitCode::Success && pr.next_index < 0) {
     return to_int(ExitCode::Success);
   }
 
-  if (cmd_start < 0) {
+  if (pr.status != ExitCode::Success) {
     return to_int(ExitCode::ArgumentError);
   }
 
-  const ExitCode result = dispatch_command(argc, argv, cmd_start, g);
+  const ExitCode result = dispatch_command(argc, argv, pr.next_index, g);
   return to_int(result);
   // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 }
