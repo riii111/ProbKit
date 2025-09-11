@@ -91,7 +91,7 @@ void print_dims(FILE* out, const probkit::cms::sketch& sk);
 void print_help();
 void json_escape_and_print(FILE* out, std::string_view s);
 template <class Items> void print_topk_json(FILE* out, const Items& items);
-void dispatch_line(spsc_ring<LineItem>& ring, const std::string& line);
+void dispatch_line(spsc_ring<LineItem>& ring, std::string& line);
 auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool;
 auto build_locals(int num_workers, const CmsOptions& co, const GlobalOptions& g, std::vector<probkit::cms::sketch>& out)
     -> bool;
@@ -301,10 +301,10 @@ template <class Items> inline void print_topk_json(FILE* out, const Items& items
   std::fputs("]}\n", out);
 }
 
-inline void dispatch_line(spsc_ring<LineItem>& ring, const std::string& line) {
+inline void dispatch_line(spsc_ring<LineItem>& ring, std::string& line) {
   using namespace std::chrono_literals;
   int spins = 0;
-  while (!ring.try_emplace(line)) {
+  while (!ring.try_emplace(std::move(line))) {
     if (spins < 16) {
       std::this_thread::yield();
       ++spins;

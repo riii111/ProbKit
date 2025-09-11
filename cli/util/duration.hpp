@@ -68,10 +68,16 @@ struct Timebase {
 #if defined(_WIN32)
   gmtime_s(&tm_utc, &t);
 #else
-  std::tm* ptm = std::gmtime(&t);
-  if (ptm != nullptr) {
-    tm_utc = *ptm;
-  }
+  #if defined(__unix__) || defined(__APPLE__)
+    // thread-safe variant on POSIX
+    gmtime_r(&t, &tm_utc);
+  #else
+    // fallback (not thread-safe)
+    std::tm* ptm = std::gmtime(&t);
+    if (ptm != nullptr) {
+      tm_utc = *ptm;
+    }
+  #endif
 #endif
   std::array<char, 32> buf{};
   if (std::snprintf(buf.data(), buf.size(), "%04d-%02d-%02dT%02d:%02d:%02dZ", tm_utc.tm_year + 1900, tm_utc.tm_mon + 1,
