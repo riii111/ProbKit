@@ -185,9 +185,6 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
   workers_ended.store(true, std::memory_order_release);
 
   if (reducer_started) {
-#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
-    reducer.request_stop();
-#endif
     if (reducer.joinable()) {
       reducer.join();
     }
@@ -550,7 +547,7 @@ auto start_reducer_cms(const GlobalOptions& g, std::vector<probkit::cms::sketch>
     auto bucket_start = std::chrono::steady_clock::now();
     auto bucket_end = bucket_start + bucket_ns;
 
-    auto make_sketch = [&](probkit::hashing::HashConfig hc) -> result<cms::sketch> {
+    auto make_sketch = [&](probkit::hashing::HashConfig hc) -> probkit::result<probkit::cms::sketch> {
       auto s =
           probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, hc);
       return s;
@@ -573,14 +570,16 @@ auto start_reducer_cms(const GlobalOptions& g, std::vector<probkit::cms::sketch>
     ) {
       std::this_thread::sleep_for(sleep_quanta);
       const auto now = std::chrono::steady_clock::now();
-      const bool need_rotate =
-          now >= bucket_end || (done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire));
+      const bool finishing = done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire);
+      const bool need_rotate = now >= bucket_end || finishing;
       if (!need_rotate) {
         continue;
       }
-      merging.store(true, std::memory_order_release);
-      while (paused.load(std::memory_order_acquire) < num_workers) {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      if (!finishing) {
+        merging.store(true, std::memory_order_release);
+        while (paused.load(std::memory_order_acquire) < num_workers) {
+          std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
       }
       for (auto& tl : locals) {
         (void)acc.merge(tl);
@@ -613,7 +612,8 @@ auto start_reducer_cms(const GlobalOptions& g, std::vector<probkit::cms::sketch>
       } else {
         const auto ts = format_utc_iso8601(tb.to_system(bucket_start));
         if (g.json) {
-          print_dims(stdout, acc);
+          auto [d, w] = acc.dims();
+          std::fprintf(stdout, "{\"ts\":\"%s\",\"depth\":%zu,\"width\":%zu}\n", ts.c_str(), d, w);
         } else {
           std::fprintf(stdout, "%s\trotated\n", ts.c_str());
         }
@@ -629,10 +629,12 @@ auto start_reducer_cms(const GlobalOptions& g, std::vector<probkit::cms::sketch>
       if (new_acc_r) {
         acc = std::move(new_acc_r.value());
       }
-      paused.store(0, std::memory_order_release);
-      merging.store(false, std::memory_order_release);
+      if (!finishing) {
+        paused.store(0, std::memory_order_release);
+        merging.store(false, std::memory_order_release);
+      }
 
-      if (done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire)) {
+      if (finishing) {
         break;
       }
       bucket_start = bucket_end;

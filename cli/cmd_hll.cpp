@@ -488,15 +488,17 @@ auto start_reducer_hll(const GlobalOptions& g, std::vector<probkit::hll::sketch>
     ) {
       std::this_thread::sleep_for(sleep_quanta);
       const auto now = std::chrono::steady_clock::now();
-      const bool need_rotate =
-          now >= bucket_end || (done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire));
+      const bool finishing = done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire);
+      const bool need_rotate = now >= bucket_end || finishing;
       if (!need_rotate) {
         continue;
       }
-      // Pause workers and wait
-      merging.store(true, std::memory_order_release);
-      while (paused.load(std::memory_order_acquire) < num_workers) {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      // Pause workers and wait only if not finishing
+      if (!finishing) {
+        merging.store(true, std::memory_order_release);
+        while (paused.load(std::memory_order_acquire) < num_workers) {
+          std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
       }
       // Merge locals into accumulator
       for (auto& tl : locals) {
@@ -525,10 +527,12 @@ auto start_reducer_hll(const GlobalOptions& g, std::vector<probkit::hll::sketch>
       if (new_acc_r) {
         acc = std::move(new_acc_r.value());
       }
-      paused.store(0, std::memory_order_release);
-      merging.store(false, std::memory_order_release);
+      if (!finishing) {
+        paused.store(0, std::memory_order_release);
+        merging.store(false, std::memory_order_release);
+      }
 
-      if (done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire)) {
+      if (finishing) {
         break;
       }
       bucket_start = bucket_end;
