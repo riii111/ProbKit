@@ -25,3 +25,5 @@ CheckOptions:
     value:           'true'
   - key:             performance-unnecessary-value-param.AllowedTypes
     value:           'std::string_view'
+  - key:             readability-function-cognitive-complexity.Threshold
+    value:           35

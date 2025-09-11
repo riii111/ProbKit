@@ -1,6 +1,7 @@
 #include "options.hpp"
 #include "probkit/hash.hpp"
 #include "probkit/hll.hpp"
+#include "util/duration.hpp"
 #include "util/parse.hpp"
 #include "util/spsc_ring.hpp"
 #include "util/string_utils.hpp"
@@ -41,6 +42,9 @@
 using probkit::cli::CommandResult;
 using probkit::cli::util::parse_u64;
 using probkit::cli::util::sv_starts_with;
+using probkit::cli::util::timeutil::format_utc_iso8601;
+using probkit::cli::util::timeutil::parse_duration;
+using probkit::cli::util::timeutil::Timebase;
 
 namespace probkit::cli {
 
@@ -87,18 +91,25 @@ struct LineItem {
 struct InputPair;
 static auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool;
 static void dispatch_line(spsc_ring<LineItem>& ring, std::string& line);
-template <class StopQ> static void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq);
+template <class StopQ>
+static void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq, std::atomic<bool>* merging,
+                        std::atomic<int>* paused);
 #if PROBKIT_HAS_JTHREAD
 using WorkerThread = std::jthread;
 using ReaderThread = std::jthread;
+using ReducerThread = std::jthread;
 #else
 using WorkerThread = std::thread;
 using ReaderThread = std::thread;
+using ReducerThread = std::thread;
 #endif
 static void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::hll::sketch& sk,
-                         std::atomic<bool>& done);
+                         std::atomic<bool>& done, std::atomic<bool>* merging, std::atomic<int>* paused);
 static auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
                          std::atomic<bool>& done) -> ReaderThread;
+static auto start_reducer_hll(const GlobalOptions& g, std::vector<probkit::hll::sketch>& locals, std::uint8_t p,
+                              std::atomic<bool>& done, std::atomic<int>& paused, std::atomic<bool>& merging,
+                              int num_workers, std::atomic<bool>& workers_ended) -> ReducerThread;
 } // namespace
 
 // Reader → Workers → Reducer minimal pipeline for HLL
@@ -144,6 +155,92 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
   }
 
   std::atomic<bool> done{false};
+  std::atomic<bool> merging{false};
+  std::atomic<int> paused_workers{0};
+  std::atomic<bool> workers_ended{false};
+
+  // Single-thread fallback (stability)
+  if (num_workers <= 1) {
+    std::ifstream file_in;
+    std::istream* in = nullptr;
+    if (!open_input(g, file_in, in)) {
+      return CommandResult::IOError;
+    }
+    const bool bucket_mode = !g.bucket.empty();
+    if (!bucket_mode) {
+      auto global = std::move(sketch_r.value());
+      std::string line;
+      line.reserve(256);
+      std::uint64_t processed = 0;
+      while (std::getline(*in, line)) {
+        (void)global.add(line);
+        if ((g.stop_after != 0U) && ++processed >= g.stop_after) {
+          break;
+        }
+      }
+      auto est = global.estimate();
+      if (!est) {
+        std::fputs("error: hll estimate failed\n", stderr);
+        return CommandResult::ConfigError;
+      }
+      if (g.json) {
+        std::printf("{\"uu\":%.0f,\"m\":%zu}\n", est.value(), global.m());
+      } else {
+        std::printf("uu=%.0f m=%zu\n", est.value(), global.m());
+      }
+      return CommandResult::Success;
+    }
+
+    std::chrono::nanoseconds bucket_ns{};
+    if (!parse_duration(g.bucket, bucket_ns)) {
+      std::fputs("error: invalid --bucket value\n", stderr);
+      return CommandResult::ConfigError;
+    }
+    if (bucket_ns < std::chrono::seconds(1)) {
+      bucket_ns = std::chrono::seconds(1);
+    }
+    Timebase tb{};
+    auto bucket_start = std::chrono::steady_clock::now();
+    auto bucket_end = bucket_start + bucket_ns;
+    auto bucket_sk_r = probkit::hll::sketch::make_by_precision(p, g.hash);
+    if (!bucket_sk_r) {
+      std::fputs("error: failed to init hll bucket\n", stderr);
+      return CommandResult::ConfigError;
+    }
+    auto bucket_sk = std::move(bucket_sk_r.value());
+    std::string line;
+    line.reserve(256);
+    std::uint64_t processed = 0;
+    auto flush_bucket = [&](std::chrono::steady_clock::time_point ts_steady) -> void {
+      auto est = bucket_sk.estimate();
+      if (est) {
+        const auto ts = format_utc_iso8601(tb.to_system(ts_steady));
+        if (g.json) {
+          std::printf("{\"ts\":\"%s\",\"uu\":%.0f,\"m\":%zu}\n", ts.c_str(), est.value(), bucket_sk.m());
+        } else {
+          std::printf("%s\tuu=%.0f m=%zu\n", ts.c_str(), est.value(), bucket_sk.m());
+        }
+      }
+      auto r = probkit::hll::sketch::make_by_precision(p, g.hash);
+      if (r) {
+        bucket_sk = std::move(r.value());
+      }
+    };
+    while (std::getline(*in, line)) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= bucket_end) {
+        flush_bucket(bucket_start);
+        bucket_start = bucket_end;
+        bucket_end = bucket_start + bucket_ns;
+      }
+      (void)bucket_sk.add(line);
+      if ((g.stop_after != 0U) && ++processed >= g.stop_after) {
+        break;
+      }
+    }
+    flush_bucket(bucket_start);
+    return CommandResult::Success;
+  }
 
   // Workers
 #if PROBKIT_HAS_JTHREAD
@@ -153,11 +250,21 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
 #endif
   workers.reserve(static_cast<std::size_t>(num_workers));
   for (int wi = 0; wi < num_workers; ++wi) {
-    spawn_worker(workers, *rings[static_cast<std::size_t>(wi)], locals[static_cast<std::size_t>(wi)], done);
+    spawn_worker(workers, *rings[static_cast<std::size_t>(wi)], locals[static_cast<std::size_t>(wi)], done, &merging,
+                 &paused_workers);
   }
 
   // Reader
   ReaderThread reader = start_reader(g, rings, num_workers, done);
+
+  // Optional reducer for bucket mode
+  const bool bucket_mode = !g.bucket.empty();
+  ReducerThread reducer;
+  bool reducer_started = false;
+  if (bucket_mode) {
+    reducer = start_reducer_hll(g, locals, p, done, paused_workers, merging, num_workers, workers_ended);
+    reducer_started = true;
+  }
 
   // Wait: reader then workers
   reader.join();
@@ -166,11 +273,25 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     w.request_stop();
     // jthread joins on destruction; explicit stop to hasten exit if sleeping
   }
+  for (auto& w : workers) {
+    if (w.joinable()) {
+      w.join();
+    }
+  }
 #else
   for (auto& w : workers) {
     w.join();
   }
 #endif
+
+  workers_ended.store(true, std::memory_order_release);
+
+  if (reducer_started) {
+    if (reducer.joinable()) {
+      reducer.join();
+    }
+    return CommandResult::Success;
+  }
 
   // Reducer: merge locals
   auto global = std::move(sketch_r.value());
@@ -178,7 +299,7 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     (void)global.merge(tl);
   }
 
-  // Final output (non-bucketed for PR-21)
+  // Final output (non-bucket)
   auto est = global.estimate();
   if (!est) {
     std::fputs("error: hll estimate failed\n", stderr);
@@ -218,9 +339,25 @@ inline void dispatch_line(spsc_ring<LineItem>& ring, std::string& line) {
   }
 }
 
-template <class StopQ> inline void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq) {
+template <class StopQ>
+inline void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq, std::atomic<bool>* merging,
+                        std::atomic<int>* paused) {
   LineItem item;
+  bool counted_pause = false;
   while (true) {
+    if (merging != nullptr && merging->load(std::memory_order_acquire)) {
+      if (!counted_pause) {
+        if (paused != nullptr) {
+          paused->fetch_add(1, std::memory_order_acq_rel);
+        }
+        counted_pause = true;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+      continue;
+    }
+    if (counted_pause) {
+      counted_pause = false;
+    }
     if (ring.pop(item)) {
       (void)sk.add(item.data);
     } else if (stopq()) {
@@ -232,10 +369,15 @@ template <class StopQ> inline void worker_loop(spsc_ring<LineItem>& ring, probki
 }
 #if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
 static void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::hll::sketch& sk,
-                         std::atomic<bool>& done) {
-  ws.emplace_back([&](std::stop_token st) {
-    auto stopq = [&]() -> bool { return done.load(std::memory_order_acquire) || st.stop_requested(); };
-    worker_loop(ring, sk, stopq);
+                         std::atomic<bool>& done, std::atomic<bool>* merging, std::atomic<int>* paused) {
+  auto* ring_p = &ring;
+  auto* sk_p = &sk;
+  auto* done_p = &done;
+  auto* merging_p = merging;
+  auto* paused_p = paused;
+  ws.emplace_back([ring_p, sk_p, done_p, merging_p, paused_p](std::stop_token st) {
+    auto stopq = [done_p, &st]() -> bool { return done_p->load(std::memory_order_acquire) || st.stop_requested(); };
+    worker_loop(*ring_p, *sk_p, stopq, merging_p, paused_p);
   });
 }
 static ReaderThread start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings,
@@ -264,10 +406,15 @@ static ReaderThread start_reader(const GlobalOptions& g, const std::vector<spsc_
 }
 #else
 void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::hll::sketch& sk,
-                  std::atomic<bool>& done) {
-  ws.emplace_back([&]() -> void {
-    auto stopq = [&]() -> bool { return done.load(std::memory_order_acquire); };
-    worker_loop(ring, sk, stopq);
+                  std::atomic<bool>& done, std::atomic<bool>* merging, std::atomic<int>* paused) {
+  auto* ring_p = &ring;
+  auto* sk_p = &sk;
+  auto* done_p = &done;
+  auto* merging_p = merging;
+  auto* paused_p = paused;
+  ws.emplace_back([ring_p, sk_p, done_p, merging_p, paused_p]() -> void {
+    auto stopq = [done_p]() -> bool { return done_p->load(std::memory_order_acquire); };
+    worker_loop(*ring_p, *sk_p, stopq, merging_p, paused_p);
   });
 }
 auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*>& rings, int num_workers,
@@ -297,5 +444,97 @@ auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*
   });
 }
 #endif
+} // namespace
+} // namespace probkit::cli
+
+// ==================== Reducer (bucketed output) ====================
+namespace probkit::cli {
+namespace {
+auto start_reducer_hll(const GlobalOptions& g, std::vector<probkit::hll::sketch>& locals, std::uint8_t p,
+                       std::atomic<bool>& done, std::atomic<int>& paused, std::atomic<bool>& merging, int num_workers,
+                       std::atomic<bool>& workers_ended) -> ReducerThread {
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+  return ReducerThread([&, p](std::stop_token st) {
+#else
+  return ReducerThread([&, p]() -> void {
+#endif
+    std::chrono::nanoseconds bucket_ns{};
+    if (!parse_duration(g.bucket, bucket_ns)) {
+      std::fputs("error: invalid --bucket value\n", stderr);
+      return;
+    }
+    if (bucket_ns < std::chrono::seconds(1)) {
+      bucket_ns = std::chrono::seconds(1);
+    }
+
+    Timebase tb{};
+    auto bucket_start = std::chrono::steady_clock::now();
+    auto bucket_end = bucket_start + bucket_ns;
+
+    auto acc_r = probkit::hll::sketch::make_by_precision(p, locals.empty() ? g.hash : locals.front().hash_config());
+    if (!acc_r) {
+      std::fputs("error: hll reducer init failed\n", stderr);
+      return;
+    }
+    auto acc = std::move(acc_r.value());
+
+    const auto sleep_quanta = std::chrono::milliseconds(50);
+    while (
+#if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
+        !st.stop_requested()
+#else
+        true
+#endif
+    ) {
+      std::this_thread::sleep_for(sleep_quanta);
+      const auto now = std::chrono::steady_clock::now();
+      const bool need_rotate =
+          now >= bucket_end || (done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire));
+      if (!need_rotate) {
+        continue;
+      }
+      // Pause workers and wait
+      merging.store(true, std::memory_order_release);
+      while (paused.load(std::memory_order_acquire) < num_workers) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+      // Merge locals into accumulator
+      for (auto& tl : locals) {
+        (void)acc.merge(tl);
+      }
+      // Emit
+      auto est = acc.estimate();
+      if (est) {
+        const auto ts = format_utc_iso8601(tb.to_system(bucket_start));
+        if (g.json) {
+          std::printf("{\"ts\":\"%s\",\"uu\":%.0f,\"m\":%zu}\n", ts.c_str(), est.value(), acc.m());
+        } else {
+          std::printf("%s\tuu=%.0f m=%zu\n", ts.c_str(), est.value(), acc.m());
+        }
+      } else {
+        std::fputs("error: hll estimate failed\n", stderr);
+      }
+      // Reset
+      for (auto& tl : locals) {
+        auto s = probkit::hll::sketch::make_by_precision(p, tl.hash_config());
+        if (s) {
+          tl = std::move(s.value());
+        }
+      }
+      auto new_acc_r = probkit::hll::sketch::make_by_precision(p, acc.hash_config());
+      if (new_acc_r) {
+        acc = std::move(new_acc_r.value());
+      }
+      paused.store(0, std::memory_order_release);
+      merging.store(false, std::memory_order_release);
+
+      if (done.load(std::memory_order_acquire) && workers_ended.load(std::memory_order_acquire)) {
+        break;
+      }
+      bucket_start = bucket_end;
+      bucket_end = bucket_start + bucket_ns;
+    }
+  });
+}
 } // namespace
 } // namespace probkit::cli

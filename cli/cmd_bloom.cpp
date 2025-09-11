@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,14 +28,18 @@ struct BloomOptions {
   std::uint64_t mem{0};
   bool have_cap{false};
   std::uint64_t cap{0};
+  enum class Action : std::uint8_t { none, dedup };
+  Action action{Action::none};
 };
 
 constexpr std::string_view kFP = "--fp=";
 constexpr std::string_view kCAP = "--capacity-hint=";
 constexpr std::string_view kMEM = "--mem-budget=";
+constexpr std::string_view kACT = "--action=";
 
 inline void print_usage() {
-  std::fputs("usage: probkit bloom [--fp=<p> [--capacity-hint=<n>]] | [--mem-budget=<bytes>]\n", stdout);
+  std::fputs("usage: probkit bloom [--fp=<p> [--capacity-hint=<n>]] | [--mem-budget=<bytes>] [--action=dedup]\n",
+             stdout);
 }
 
 auto parse_bloom_options(const std::vector<std::string_view>& args) -> BloomOptions;
@@ -88,6 +93,17 @@ auto parse_bloom_options(const std::vector<std::string_view>& args) -> BloomOpti
       }
       opts.mem = value;
       opts.have_mem = true;
+      continue;
+    }
+    if (sv_starts_with(arg, kACT)) {
+      auto v = arg.substr(kACT.size());
+      if (v == std::string_view{"dedup"}) {
+        opts.action = BloomOptions::Action::dedup;
+      } else {
+        std::fputs("error: invalid --action\n", stderr);
+        opts.show_help = true;
+        break;
+      }
       continue;
     }
   }
@@ -192,10 +208,71 @@ auto cmd_bloom(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     return CommandResult::GeneralError;
   }
   probkit::bloom::filter f = std::move(r.value());
-  if (g.json) {
-    std::fprintf(stdout, "{\"m_bits\":%zu,\"k\":%u}\n", f.bit_size(), static_cast<unsigned>(f.k()));
+  if (opt.action != BloomOptions::Action::dedup) {
+    if (g.json) {
+      std::fprintf(stdout, "{\"m_bits\":%zu,\"k\":%u}\n", f.bit_size(), static_cast<unsigned>(f.k()));
+    } else {
+      std::fprintf(stdout, "bloom: m_bits=%zu k=%u\n", f.bit_size(), static_cast<unsigned>(f.k()));
+    }
+    return CommandResult::Success;
+  }
+
+  // dedup streaming (single-threaded baseline)
+  std::istream* in = nullptr;
+  std::ifstream file_in_local;
+  if (!g.file_path.empty() && g.file_path != "-") {
+    file_in_local.open(g.file_path, std::ios::in);
+    if (!file_in_local.is_open()) {
+      std::fputs("error: failed to open --file\n", stderr);
+      return CommandResult::IOError;
+    }
+    in = &file_in_local;
   } else {
-    std::fprintf(stdout, "bloom: m_bits=%zu k=%u\n", f.bit_size(), static_cast<unsigned>(f.k()));
+#ifdef _WIN32
+    in = &std::cin;
+#else
+    // Avoid direct use of std::cin to placate certain toolchains; use /dev/stdin on POSIX
+    file_in_local.open("/dev/stdin", std::ios::in);
+    if (!file_in_local.is_open()) {
+      std::fputs("error: failed to open stdin\n", stderr);
+      return CommandResult::IOError;
+    }
+    in = &file_in_local;
+#endif
+  }
+
+  std::uint64_t seen = 0;
+  std::uint64_t passed = 0;
+  std::string line;
+  line.reserve(256);
+  while (true) {
+    if (!std::getline(*in, line)) {
+      break;
+    }
+    ++seen;
+    auto maybe_cont = f.might_contain(line);
+    if (!maybe_cont) {
+      std::fputs("error: bloom query failed\n", stderr);
+      return CommandResult::GeneralError;
+    }
+    if (!maybe_cont.value()) {
+      (void)f.add(line);
+      std::fputs(line.c_str(), stdout);
+      std::fputc('\n', stdout);
+      ++passed;
+    }
+    if ((g.stop_after != 0U) && seen >= g.stop_after) {
+      break;
+    }
+  }
+  if (g.json) {
+    if (opt.have_fp) {
+      std::fprintf(stderr, "{\"seen\":%llu,\"passed\":%llu,\"fp_target\":%.6f}\n",
+                   static_cast<unsigned long long>(seen), static_cast<unsigned long long>(passed), opt.fp);
+    } else {
+      std::fprintf(stderr, "{\"seen\":%llu,\"passed\":%llu}\n", static_cast<unsigned long long>(seen),
+                   static_cast<unsigned long long>(passed));
+    }
   }
   return CommandResult::Success;
 }
