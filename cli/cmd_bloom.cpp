@@ -150,10 +150,10 @@ inline auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istr
   return true;
 }
 
-inline void dispatch_line(spsc_ring<LineItem>& ring, std::string& line) {
+inline void dispatch_line(spsc_ring<LineItem>& ring, const std::string& line) {
   using namespace std::chrono_literals;
   int spins = 0;
-  while (!ring.try_emplace(std::move(line))) {
+  while (!ring.try_emplace(line)) {
     if (spins < 16) {
       std::this_thread::yield();
       ++spins;
