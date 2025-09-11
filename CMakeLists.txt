@@ -80,6 +80,7 @@ set_target_properties(probkit PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ===================== CLI target =====================
 add_executable(probkit_cli
   cli/main.cpp
+  cli/options_parse.cpp
   cli/cmd_bloom.cpp
   cli/cmd_hll.cpp
   cli/cmd_cms.cpp
