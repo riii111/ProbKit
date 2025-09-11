@@ -108,6 +108,7 @@ auto start_stats_if_enabled(const GlobalOptions& g, std::atomic<bool>& done,
 auto start_reducer_cms(const GlobalOptions& g, std::vector<probkit::cms::sketch>& locals, const CmsOptions& co,
                        std::atomic<bool>& done, std::atomic<int>& paused, std::atomic<bool>& merging, int num_workers,
                        std::atomic<bool>& workers_ended) -> ReducerThread;
+auto run_cms_pipeline(const CmsOptions& co, const GlobalOptions& g) -> CommandResult;
 
 } // namespace
 
@@ -117,7 +118,16 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     print_help();
     return CommandResult::Success;
   }
+  return run_cms_pipeline(co, g);
+}
 
+} // namespace probkit::cli
+
+// ==================== Details (helper implementations) ====================
+namespace probkit::cli {
+namespace {
+
+inline auto run_cms_pipeline(const CmsOptions& co, const GlobalOptions& g) -> CommandResult {
   auto global_r =
       probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, g.hash);
   if (!global_r) {
@@ -127,11 +137,9 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
 
   const int num_workers = util::decide_num_workers(g.threads);
   const std::size_t ring_capacity = 1U << 14;
-
   auto rings =
       make_rings(RingConfig{.capacity = ring_capacity, .worker_count = static_cast<unsigned int>(num_workers)});
 
-  // Thread-local sketches
   std::vector<probkit::cms::sketch> locals;
   if (!build_locals(num_workers, co, g, locals)) {
     std::fputs("error: failed to init worker cms\n", stderr);
@@ -144,7 +152,6 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
   std::atomic<int> paused_workers{0};
   std::atomic<bool> workers_ended{false};
 
-  // Workers
   std::vector<WorkerThread> workers;
   workers.reserve(static_cast<std::size_t>(num_workers));
   for (int wi = 0; wi < num_workers; ++wi) {
@@ -154,7 +161,6 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
 
   ReaderThread reader = start_reader(g, rings.views, num_workers, done, processed_total);
 
-  // Optional reducer for bucket mode
   const bool bucket_mode = !g.bucket.empty();
   ReducerThread reducer;
   bool reducer_started = false;
@@ -163,11 +169,9 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     reducer_started = true;
   }
 
-  // Optional periodic stats
   StatsThread stats_thr;
   const bool stats_enabled = start_stats_if_enabled(g, done, processed_total, stats_thr);
 
-  // Wait and finalize
   reader.join();
 #if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
   for (auto& w : workers) {
@@ -181,7 +185,6 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     w.join();
   }
 #endif
-
   workers_ended.store(true, std::memory_order_release);
 
   if (reducer_started) {
@@ -198,13 +201,11 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
 #endif
   }
 
-  // Reducer: merge locals
   auto global = std::move(global_r.value());
   for (auto& tl : locals) {
     (void)global.merge(tl);
   }
 
-  // Output
   if (co.topk > 0) {
     auto r = global.topk(co.topk);
     if (!r) {
@@ -228,13 +229,6 @@ auto cmd_cms(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
   }
   return CommandResult::Success;
 }
-
-} // namespace probkit::cli
-
-// ==================== Details (helper implementations) ====================
-namespace probkit::cli {
-namespace {
-
 inline auto make_rings(const RingConfig& config) -> Rings {
   Rings r{};
   r.store.reserve(static_cast<std::size_t>(config.worker_count));
