@@ -45,6 +45,7 @@ using probkit::cli::util::sv_starts_with;
 using probkit::cli::util::timeutil::format_utc_iso8601;
 using probkit::cli::util::timeutil::parse_duration;
 using probkit::cli::util::timeutil::Timebase;
+using probkit::hashing::hash64;
 
 namespace probkit::cli {
 
@@ -91,6 +92,9 @@ struct LineItem {
 struct InputPair;
 static auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istream*& in) -> bool;
 static void dispatch_line(spsc_ring<LineItem>& ring, std::string& line);
+static auto run_hll_single_non_bucket(std::istream& in, probkit::hll::sketch global, const GlobalOptions& g)
+    -> CommandResult;
+static auto run_hll_single_bucketed(std::istream& in, std::uint8_t p, const GlobalOptions& g) -> CommandResult;
 template <class StopQ>
 static void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, StopQ stopq, std::atomic<bool>* merging,
                         std::atomic<int>* paused);
@@ -139,14 +143,11 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     rings.push_back(ring_storage.back().get());
   }
 
-  // thread-local sketches (derive per-thread salt)
+  // thread-local sketches (use identical hash config across workers)
   std::vector<probkit::hll::sketch> locals;
   locals.reserve(static_cast<std::size_t>(num_workers));
   for (int i = 0; i < num_workers; ++i) {
-    probkit::hashing::HashConfig hc = g.hash;
-    const std::uint64_t thread_index = static_cast<std::uint64_t>(i) + 1ULL;
-    hc.thread_salt = probkit::hashing::derive_thread_salt(hc.seed, thread_index);
-    auto s = probkit::hll::sketch::make_by_precision(p, hc);
+    auto s = probkit::hll::sketch::make_by_precision(p, g.hash);
     if (!s) {
       std::fputs("error: failed to init worker sketch\n", stderr);
       return CommandResult::ConfigError;
@@ -168,78 +169,9 @@ auto cmd_hll(int argc, char** argv, const GlobalOptions& g) -> CommandResult {
     }
     const bool bucket_mode = !g.bucket.empty();
     if (!bucket_mode) {
-      auto global = std::move(sketch_r.value());
-      std::string line;
-      line.reserve(256);
-      std::uint64_t processed = 0;
-      while (std::getline(*in, line)) {
-        (void)global.add(line);
-        if ((g.stop_after != 0U) && ++processed >= g.stop_after) {
-          break;
-        }
-      }
-      auto est = global.estimate();
-      if (!est) {
-        std::fputs("error: hll estimate failed\n", stderr);
-        return CommandResult::ConfigError;
-      }
-      if (g.json) {
-        std::printf("{\"uu\":%.0f,\"m\":%zu}\n", est.value(), global.m());
-      } else {
-        std::printf("uu=%.0f m=%zu\n", est.value(), global.m());
-      }
-      return CommandResult::Success;
+      return run_hll_single_non_bucket(*in, std::move(sketch_r.value()), g);
     }
-
-    std::chrono::nanoseconds bucket_ns{};
-    if (!parse_duration(g.bucket, bucket_ns)) {
-      std::fputs("error: invalid --bucket value\n", stderr);
-      return CommandResult::ConfigError;
-    }
-    if (bucket_ns < std::chrono::seconds(1)) {
-      bucket_ns = std::chrono::seconds(1);
-    }
-    Timebase tb{};
-    auto bucket_start = std::chrono::steady_clock::now();
-    auto bucket_end = bucket_start + bucket_ns;
-    auto bucket_sk_r = probkit::hll::sketch::make_by_precision(p, g.hash);
-    if (!bucket_sk_r) {
-      std::fputs("error: failed to init hll bucket\n", stderr);
-      return CommandResult::ConfigError;
-    }
-    auto bucket_sk = std::move(bucket_sk_r.value());
-    std::string line;
-    line.reserve(256);
-    std::uint64_t processed = 0;
-    auto flush_bucket = [&](std::chrono::steady_clock::time_point ts_steady) -> void {
-      auto est = bucket_sk.estimate();
-      if (est) {
-        const auto ts = format_utc_iso8601(tb.to_system(ts_steady));
-        if (g.json) {
-          std::printf("{\"ts\":\"%s\",\"uu\":%.0f,\"m\":%zu}\n", ts.c_str(), est.value(), bucket_sk.m());
-        } else {
-          std::printf("%s\tuu=%.0f m=%zu\n", ts.c_str(), est.value(), bucket_sk.m());
-        }
-      }
-      auto r = probkit::hll::sketch::make_by_precision(p, g.hash);
-      if (r) {
-        bucket_sk = std::move(r.value());
-      }
-    };
-    while (std::getline(*in, line)) {
-      const auto now = std::chrono::steady_clock::now();
-      if (now >= bucket_end) {
-        flush_bucket(bucket_start);
-        bucket_start = bucket_end;
-        bucket_end = bucket_start + bucket_ns;
-      }
-      (void)bucket_sk.add(line);
-      if ((g.stop_after != 0U) && ++processed >= g.stop_after) {
-        break;
-      }
-    }
-    flush_bucket(bucket_start);
-    return CommandResult::Success;
+    return run_hll_single_bucketed(*in, p, g);
   }
 
   // Workers
@@ -334,8 +266,15 @@ inline auto open_input(const GlobalOptions& g, std::ifstream& file_in, std::istr
 
 inline void dispatch_line(spsc_ring<LineItem>& ring, std::string& line) {
   using namespace std::chrono_literals;
+  // two-phase backoff: initial yields to reduce CPU, then sleep
+  int spins = 0;
   while (!ring.try_emplace(std::move(line))) {
-    std::this_thread::sleep_for(50us);
+    if (spins < 16) {
+      std::this_thread::yield();
+      ++spins;
+    } else {
+      std::this_thread::sleep_for(50us);
+    }
   }
 }
 
@@ -363,9 +302,86 @@ inline void worker_loop(spsc_ring<LineItem>& ring, probkit::hll::sketch& sk, Sto
     } else if (stopq()) {
       break;
     } else {
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
+      // lighter backoff under normal idle
+      std::this_thread::yield();
     }
   }
+}
+
+inline auto run_hll_single_non_bucket(std::istream& in, probkit::hll::sketch global, const GlobalOptions& g)
+    -> CommandResult {
+  std::string line;
+  line.reserve(256);
+  std::uint64_t processed = 0;
+  while (std::getline(in, line)) {
+    (void)global.add(line);
+    if ((g.stop_after != 0U) && ++processed >= g.stop_after) {
+      break;
+    }
+  }
+  auto est = global.estimate();
+  if (!est) {
+    std::fputs("error: hll estimate failed\n", stderr);
+    return CommandResult::ConfigError;
+  }
+  if (g.json) {
+    std::printf("{\"uu\":%.0f,\"m\":%zu}\n", est.value(), global.m());
+  } else {
+    std::printf("uu=%.0f m=%zu\n", est.value(), global.m());
+  }
+  return CommandResult::Success;
+}
+
+inline auto run_hll_single_bucketed(std::istream& in, std::uint8_t p, const GlobalOptions& g) -> CommandResult {
+  std::chrono::nanoseconds bucket_ns{};
+  if (!parse_duration(g.bucket, bucket_ns)) {
+    std::fputs("error: invalid --bucket value\n", stderr);
+    return CommandResult::ConfigError;
+  }
+  if (bucket_ns < std::chrono::seconds(1)) {
+    bucket_ns = std::chrono::seconds(1);
+  }
+  Timebase tb{};
+  auto bucket_start = std::chrono::steady_clock::now();
+  auto bucket_end = bucket_start + bucket_ns;
+  auto bucket_sk_r = probkit::hll::sketch::make_by_precision(p, g.hash);
+  if (!bucket_sk_r) {
+    std::fputs("error: failed to init hll bucket\n", stderr);
+    return CommandResult::ConfigError;
+  }
+  auto bucket_sk = std::move(bucket_sk_r.value());
+  std::string line;
+  line.reserve(256);
+  std::uint64_t processed = 0;
+  auto flush_bucket = [&](std::chrono::steady_clock::time_point ts_steady) -> void {
+    auto est = bucket_sk.estimate();
+    if (est) {
+      const auto ts = format_utc_iso8601(tb.to_system(ts_steady));
+      if (g.json) {
+        std::printf("{\"ts\":\"%s\",\"uu\":%.0f,\"m\":%zu}\n", ts.c_str(), est.value(), bucket_sk.m());
+      } else {
+        std::printf("%s\tuu=%.0f m=%zu\n", ts.c_str(), est.value(), bucket_sk.m());
+      }
+    }
+    auto r = probkit::hll::sketch::make_by_precision(p, g.hash);
+    if (r) {
+      bucket_sk = std::move(r.value());
+    }
+  };
+  while (std::getline(in, line)) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= bucket_end) {
+      flush_bucket(bucket_start);
+      bucket_start = bucket_end;
+      bucket_end = bucket_start + bucket_ns;
+    }
+    (void)bucket_sk.add(line);
+    if ((g.stop_after != 0U) && ++processed >= g.stop_after) {
+      break;
+    }
+  }
+  flush_bucket(bucket_start);
+  return CommandResult::Success;
 }
 #if PROBKIT_HAS_JTHREAD && PROBKIT_HAS_STOP_TOKEN
 static void spawn_worker(std::vector<WorkerThread>& ws, spsc_ring<LineItem>& ring, probkit::hll::sketch& sk,
@@ -392,12 +408,12 @@ static ReaderThread start_reader(const GlobalOptions& g, const std::vector<spsc_
     std::string line;
     line.reserve(256);
     std::uint64_t processed = 0;
-    int shard = 0;
     while (!rst.stop_requested()) {
       if (!std::getline(*in, line))
         break;
+      const std::uint64_t hv = hash64(line, g.hash);
+      const int shard = static_cast<int>(hv % static_cast<std::uint64_t>(num_workers));
       dispatch_line(*rings[static_cast<std::size_t>(shard)], line);
-      shard = (shard + 1) % num_workers;
       if (g.stop_after && ++processed >= g.stop_after)
         break;
     }
@@ -429,13 +445,13 @@ auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*
     std::string line;
     line.reserve(256);
     std::uint64_t processed = 0;
-    int shard = 0;
     while (true) {
       if (!std::getline(*in, line)) {
         break;
       }
+      const std::uint64_t hv = hash64(line, g.hash);
+      const int shard = static_cast<int>(hv % static_cast<std::uint64_t>(num_workers));
       dispatch_line(*rings[static_cast<std::size_t>(shard)], line);
-      shard = (shard + 1) % num_workers;
       if (g.stop_after && ++processed >= g.stop_after) {
         break;
       }

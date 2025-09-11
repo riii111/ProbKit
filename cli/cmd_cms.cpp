@@ -309,8 +309,14 @@ template <class Items> inline void print_topk_json(FILE* out, const Items& items
 
 inline void dispatch_line(spsc_ring<LineItem>& ring, std::string& line) {
   using namespace std::chrono_literals;
+  int spins = 0;
   while (!ring.try_emplace(std::move(line))) {
-    std::this_thread::sleep_for(50us);
+    if (spins < 16) {
+      std::this_thread::yield();
+      ++spins;
+    } else {
+      std::this_thread::sleep_for(50us);
+    }
   }
 }
 
@@ -332,10 +338,8 @@ inline auto build_locals(int num_workers, const CmsOptions& co, const GlobalOpti
                          std::vector<probkit::cms::sketch>& out) -> bool {
   out.reserve(static_cast<std::size_t>(num_workers));
   for (int i = 0; i < num_workers; ++i) {
-    probkit::hashing::HashConfig hc = g.hash;
-    const std::uint64_t thread_index = static_cast<std::uint64_t>(i) + 1ULL;
-    hc.thread_salt = probkit::hashing::derive_thread_salt(hc.seed, thread_index);
-    auto s = probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, hc);
+    auto s =
+        probkit::cms::sketch::make_by_eps_delta(co.have_eps ? co.eps : 1e-3, co.have_delta ? co.delta : 1e-4, g.hash);
     if (!s) {
       return false;
     }
@@ -438,7 +442,7 @@ inline void worker_loop(spsc_ring<LineItem>& ring, probkit::cms::sketch& sk, Sto
     } else if (stopq()) {
       break;
     } else {
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
+      std::this_thread::yield();
     }
   }
 }
@@ -466,13 +470,13 @@ auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*
     std::string line;
     line.reserve(256);
     std::uint64_t processed = 0;
-    int shard = 0;
     while (!rst.stop_requested()) {
       if (!std::getline(*in, line)) {
         break;
       }
+      const std::uint64_t hv = hashing::hash64(line, g.hash);
+      const int shard = static_cast<int>(hv % static_cast<std::uint64_t>(num_workers));
       dispatch_line(*rings[static_cast<std::size_t>(shard)], line);
-      shard = (shard + 1) % num_workers;
       processed_total.fetch_add(1, std::memory_order_relaxed);
       if (g.stop_after && ++processed >= g.stop_after) {
         break;
@@ -504,13 +508,13 @@ auto start_reader(const GlobalOptions& g, const std::vector<spsc_ring<LineItem>*
     std::string line;
     line.reserve(256);
     std::uint64_t processed = 0;
-    int shard = 0;
     while (true) {
       if (!std::getline(*in, line)) {
         break;
       }
+      const std::uint64_t hv = hashing::hash64(line, g.hash);
+      const int shard = static_cast<int>(hv % static_cast<std::uint64_t>(num_workers));
       dispatch_line(*rings[static_cast<std::size_t>(shard)], line);
-      shard = (shard + 1) % num_workers;
       processed_total.fetch_add(1, std::memory_order_relaxed);
       if (g.stop_after && ++processed >= g.stop_after) {
         break;
